@@ -19,7 +19,12 @@ echo "Generating systemd units for '$PROJECT' in $OUTPUT_DIR"
 generate_unit() {
     local name="$1" script="$2" interval_sec="$3" args="${4:-}"
 
-    local exec_start="/bin/bash $script"
+    local exec_start
+    if [[ "$script" == *.py ]]; then
+        exec_start="/usr/bin/python3 $script"
+    else
+        exec_start="/bin/bash $script"
+    fi
     [[ -n "$args" ]] && exec_start="$exec_start $args"
 
     # Service file
@@ -64,6 +69,12 @@ generate_unit "${PREFIX}-director-autonomous" "$AAU_ROOT/lib/director_autonomous
 
 RESP_INT="${AAU_DIRECTOR_RESPONDER_INTERVAL:-120}"
 generate_unit "${PREFIX}-director-responder" "$AAU_ROOT/lib/director_responder.sh" "$RESP_INT"
+
+# Slack monitor (if notification plugin is slack)
+NOTIFY_PLUGIN="${AAU_NOTIFICATION_PLUGIN:-none}"
+if [[ "$NOTIFY_PLUGIN" == "slack" ]]; then
+    generate_unit "${PREFIX}-slack-monitor" "$AAU_ROOT/lib/slack_monitor.py" "60" "$REPO"
+fi
 
 for MEMBER in $(aau_team_members); do
     M_INT=$(aau_member_attr "$MEMBER" "interval")

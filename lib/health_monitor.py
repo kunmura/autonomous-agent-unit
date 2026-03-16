@@ -16,48 +16,128 @@ from pathlib import Path
 
 # ─── Config loading ──────────────────────────────────────────────────────
 
-def load_config() -> dict:
-    """Load aau.yaml from project root."""
-    # Find aau.yaml by walking up from script location or CWD
+def _parse_yaml_simple(text: str) -> dict:
+    """Minimal YAML parser for aau.yaml — no external dependencies.
+    Handles: top-level sections, nested keys, list items (- value, - key: value)."""
+    result = {}
+    section = None       # e.g. "project", "runtime", "team"
+    subsection = None    # e.g. "members", "max_turns", "critical_patterns"
+    current_member = None
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        indent = len(line) - len(line.lstrip())
+
+        # Top-level section (indent 0)
+        if indent == 0 and stripped.endswith(":") and not stripped.startswith("-"):
+            section = stripped[:-1].strip()
+            subsection = None
+            current_member = None
+            if section not in result:
+                result[section] = {}
+            continue
+
+        if section is None:
+            continue
+
+        # List item
+        if stripped.startswith("- "):
+            item = stripped[2:].strip()
+            if subsection == "members":
+                # "- name: foo"
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    k, v = k.strip(), v.strip().strip('"').strip("'")
+                    current_member = {"name": v} if k == "name" else {k: v}
+                    if "members" not in result.get(section, {}):
+                        result[section]["members"] = []
+                    result[section]["members"].append(current_member)
+            elif subsection:
+                # Simple list: "- "some pattern""
+                val = item.strip('"').strip("'")
+                target = result.get(section, {})
+                if subsection not in target:
+                    target[subsection] = []
+                if isinstance(target[subsection], list):
+                    target[subsection].append(val)
+            continue
+
+        # Continuation of member dict (role:, timeout:, etc.)
+        if current_member is not None and indent >= 6 and ":" in stripped:
+            k, v = stripped.split(":", 1)
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            current_member[k] = v
+            continue
+
+        if ":" not in stripped:
+            continue
+
+        key, _, value = stripped.partition(":")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+
+        if not value:
+            # Subsection
+            subsection = key
+            current_member = None
+            if isinstance(result.get(section), dict) and key not in result[section]:
+                # Known list subsections get initialized as lists
+                if key in ("members", "critical_patterns", "warning_patterns"):
+                    result[section][key] = []
+                else:
+                    result[section][key] = {}
+            continue
+
+        # Regular key: value
+        current_member = None
+        if subsection and isinstance(result.get(section), dict):
+            sub = result[section].get(subsection)
+            if isinstance(sub, dict):
+                sub[key] = value
+            elif isinstance(sub, list):
+                # Key after a list subsection — belongs to section, not subsection
+                subsection = None
+                result[section][key] = value
+            elif sub is None:
+                result[section][subsection] = {key: value}
+        elif isinstance(result.get(section), dict):
+            result[section][key] = value
+
+    # Post-process: ensure list fields are lists
+    for section_name in ["health"]:
+        sec = result.get(section_name, {})
+        for list_key in ["critical_patterns", "warning_patterns"]:
+            v = sec.get(list_key)
+            if isinstance(v, dict):
+                sec[list_key] = list(v.values())
+            elif isinstance(v, str):
+                sec[list_key] = [v]
+            elif v is None:
+                sec[list_key] = []
+
+    return result
+
+
+def load_config_simple() -> tuple[dict, Path]:
+    """Load aau.yaml without any external dependencies."""
     search_dirs = [Path.cwd(), Path(__file__).resolve().parent.parent]
     for start in search_dirs:
         d = start
         while d != d.parent:
-            cfg = d / "aau.yaml"
-            if cfg.exists():
-                import yaml
-                return yaml.safe_load(cfg.read_text()), d
+            cfg_path = d / "aau.yaml"
+            if cfg_path.exists():
+                return _parse_yaml_simple(cfg_path.read_text()), d
             d = d.parent
-    # Fallback: try environment
-    cfg_path = os.environ.get("AAU_CONFIG_FILE")
-    if cfg_path and Path(cfg_path).exists():
-        import yaml
-        p = Path(cfg_path)
-        return yaml.safe_load(p.read_text()), p.parent
+    # Fallback: environment variable
+    cfg_env = os.environ.get("AAU_CONFIG_FILE")
+    if cfg_env and Path(cfg_env).exists():
+        p = Path(cfg_env)
+        return _parse_yaml_simple(p.read_text()), p.parent
     print("ERROR: aau.yaml not found", file=sys.stderr)
     sys.exit(1)
-
-
-def load_config_simple() -> tuple[dict, Path]:
-    """Load config without yaml dependency (JSON-subset fallback)."""
-    try:
-        return load_config()
-    except ImportError:
-        # yaml not available — parse with python3 subprocess
-        search = Path.cwd()
-        while search != search.parent:
-            cfg = search / "aau.yaml"
-            if cfg.exists():
-                result = subprocess.run(
-                    ["python3", "-c",
-                     f"import yaml,json; print(json.dumps(yaml.safe_load(open('{cfg}'))))"],
-                    capture_output=True, text=True
-                )
-                if result.returncode == 0:
-                    return json.loads(result.stdout), search
-            search = search.parent
-        print("ERROR: aau.yaml not found or PyYAML not installed", file=sys.stderr)
-        sys.exit(1)
 
 
 # ─── Main ────────────────────────────────────────────────────────────────
@@ -77,7 +157,7 @@ def main() -> None:
     warning_patterns = health_cfg.get("warning_patterns", [
         "TESTS FAILED", "assert failed", "Error: "
     ])
-    stale_threshold = health_cfg.get("stale_threshold", 1500)
+    stale_threshold = int(health_cfg.get("stale_threshold", 1500))
 
     log_file = tmp_dir / f"{prefix}_health_monitor.log"
     jsonl_file = tmp_dir / f"{prefix}_health_monitor.jsonl"

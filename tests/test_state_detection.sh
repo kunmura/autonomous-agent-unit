@@ -130,6 +130,77 @@ assert_eq "lock file created" "true" "$LOCK_EXISTS"
 LOCK_PID=$(cat "$TEST_TMP/test_test_lock_1.lock")
 assert_eq "lock contains PID" "$$" "$LOCK_PID"
 
+# ─── Test 5: APPROVAL_GATE blocks IDLE_ALL ─────────────────────────────
+echo ""
+echo "=== Test: Approval gate blocks IDLE_ALL ==="
+cat > "$TEST_DIR/team/dev/tasks.md" << 'TASKS'
+# Dev Tasks
+## TASK-3 [DONE]
+Completed task
+TASKS
+
+echo "dev:1" | aau_md5 > "$TEST_TMP/test_autonomous_done_seed"
+touch "$TEST_TMP/test_last_report"
+
+# Create status.md with approval pending
+mkdir -p "$TEST_DIR/team/director"
+cat > "$TEST_DIR/team/director/status.md" << 'STATUS'
+# Project Status
+## Phase 1: Research [完了]
+プロデューサー承認待ち
+STATUS
+
+ACTION="NO_ACTION"
+STATUS_FILE="$TEST_DIR/team/director/status.md"
+
+# Check approval gate (same logic as director_autonomous.sh)
+if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+    ACTION="APPROVAL_BLOCKED"
+fi
+
+# If not blocked by approval, check IDLE_ALL
+if [[ "$ACTION" == "NO_ACTION" ]]; then
+    TOTAL_PENDING=0; TOTAL_INPROG=0
+    for MEMBER in $(aau_team_members); do
+        TF="$TEST_DIR/team/$MEMBER/tasks.md"
+        [[ -f "$TF" ]] || continue
+        P=$(grep -c '\[PENDING\]' "$TF" 2>/dev/null || true)
+        I=$(grep -c '\[IN_PROGRESS\]' "$TF" 2>/dev/null || true)
+        TOTAL_PENDING=$((TOTAL_PENDING + P))
+        TOTAL_INPROG=$((TOTAL_INPROG + I))
+    done
+    [[ "$TOTAL_PENDING" -eq 0 && "$TOTAL_INPROG" -eq 0 ]] && ACTION="IDLE_ALL"
+fi
+
+assert_eq "Approval gate blocks IDLE_ALL" "APPROVAL_BLOCKED" "$ACTION"
+
+# ─── Test 6: MILESTONE detection ──────────────────────────────────────
+echo ""
+echo "=== Test: Milestone change detection ==="
+cat > "$TEST_DIR/team/director/status.md" << 'STATUS'
+# Project Status
+## Phase 1: Research
+In progress
+STATUS
+
+PHASE_LINES=$(grep -iE '^#+\s*(phase|step|フェーズ|ステップ)' "$TEST_DIR/team/director/status.md" 2>/dev/null || true)
+HASH1=$(echo "$PHASE_LINES" | aau_md5)
+
+# Change phase
+cat > "$TEST_DIR/team/director/status.md" << 'STATUS'
+# Project Status
+## Phase 2: Analysis
+Starting analysis
+STATUS
+
+PHASE_LINES2=$(grep -iE '^#+\s*(phase|step|フェーズ|ステップ)' "$TEST_DIR/team/director/status.md" 2>/dev/null || true)
+HASH2=$(echo "$PHASE_LINES2" | aau_md5)
+
+MILESTONE_CHANGED="false"
+[[ "$HASH1" != "$HASH2" ]] && MILESTONE_CHANGED="true"
+
+assert_eq "Milestone hash changes on phase change" "true" "$MILESTONE_CHANGED"
+
 # ─── Results ─────────────────────────────────────────────────────────────
 echo ""
 echo "============================================="

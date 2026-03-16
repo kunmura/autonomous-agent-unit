@@ -69,22 +69,20 @@ fi
 aau_log "tools: $TOOLS"
 
 if [[ -n "$AGENT_FLAG" ]]; then
-    aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$AAU_CLAUDE" \
+    aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
         $AGENT_FLAG \
         --model "$AAU_MODEL" \
         --print \
         --permission-mode "$AAU_PERM" \
         --max-turns "$MAX_TURNS" \
-        $TOOL_FLAGS \
-        "$PROMPT"
+        $TOOL_FLAGS
 else
-    aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$AAU_CLAUDE" \
+    aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
         --model "$AAU_MODEL" \
         --print \
         --permission-mode "$AAU_PERM" \
         --max-turns "$MAX_TURNS" \
-        $TOOL_FLAGS \
-        "$PROMPT"
+        $TOOL_FLAGS
 fi
 
 EXIT_CODE=$?

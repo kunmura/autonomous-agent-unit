@@ -110,6 +110,7 @@ director:
   responder_interval: 120
   timeout: 600
   max_turns:
+    milestone: 10
     report: 15
     followup: 20
     stale: 10
@@ -117,6 +118,7 @@ director:
     respond: 40
   report_interval: 7200
   stale_threshold: 1800
+  approval_reminder_interval: 21600
   daily_max_invocations: 20
   quiet_hours_start: $QUIET_START
   quiet_hours_end: $QUIET_END

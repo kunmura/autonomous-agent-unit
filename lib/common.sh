@@ -91,8 +91,10 @@ aau_acquire_lock() {
 # ─── Timeout ─────────────────────────────────────────────────────────────
 
 aau_run_with_timeout() {
-    local timeout_secs="$1" outfile="$2"; shift 2
-    "$@" > "$outfile" 2>&1 &
+    local timeout_secs="$1" outfile="$2" stdin_data="$3"; shift 3
+    # Pass prompt via stdin to avoid conflicts with --tools flag
+    # (Claude CLI cannot accept positional prompt when --tools is specified)
+    echo "$stdin_data" | "$@" > "$outfile" 2>&1 &
     local cmd_pid=$!
     ( sleep "$timeout_secs" && kill "$cmd_pid" 2>/dev/null && kill -- -"$cmd_pid" 2>/dev/null ) &
     local watchdog_pid=$!

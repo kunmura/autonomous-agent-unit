@@ -89,14 +89,13 @@ aau_log "launching Claude (max_turns=$MAX_TURNS)"
 aau_jlog "info" "claude_launch" "\"max_turns\":$MAX_TURNS"
 
 DIRECTOR_TOOLS="Read,Write,Edit,Bash"
-aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$AAU_CLAUDE" \
+aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
     --model "$AAU_MODEL" \
     --print \
     --permission-mode "$AAU_PERM" \
     --max-turns "$MAX_TURNS" \
     --tools "$DIRECTOR_TOOLS" \
-    --allowedTools "$DIRECTOR_TOOLS" \
-    "$PROMPT"
+    --allowedTools "$DIRECTOR_TOOLS"
 
 MAIN_EXIT=$?
 MAIN_OUTPUT=$(cat "$OUTFILE" 2>/dev/null)

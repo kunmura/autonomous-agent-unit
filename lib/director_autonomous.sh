@@ -60,17 +60,63 @@ REPORT_MARKER="${AAU_TMP}/${AAU_PREFIX}_last_report"
 DONE_SEED="${AAU_TMP}/${AAU_PREFIX}_autonomous_done_seed"
 REPORT_INTERVAL="${AAU_DIRECTOR_REPORT_INTERVAL:-7200}"
 STALE_THRESHOLD="${AAU_DIRECTOR_STALE_THRESHOLD:-1800}"
+REPORT_STATE_SEED="${AAU_TMP}/${AAU_PREFIX}_report_state_seed"
+MILESTONE_SEED="${AAU_TMP}/${AAU_PREFIX}_milestone_seed"
+APPROVAL_REMINDER_MARKER="${AAU_TMP}/${AAU_PREFIX}_approval_reminder"
+APPROVAL_REMINDER_INTERVAL="${AAU_DIRECTOR_APPROVAL_REMINDER_INTERVAL:-21600}"
+STATUS_FILE="$TEAM_DIR/director/status.md"
+
+# --- 0. MILESTONE_REPORT (highest priority) ---
+if [[ -f "$STATUS_FILE" ]]; then
+    PHASE_LINES=$(grep -iE '^#+\s*(phase|step|フェーズ|ステップ)' "$STATUS_FILE" 2>/dev/null || true)
+    if [[ -n "$PHASE_LINES" ]]; then
+        CURRENT_MILESTONE_HASH=$(echo "$PHASE_LINES" | aau_md5)
+        PREV_MILESTONE_HASH=""
+        [[ -f "$MILESTONE_SEED" ]] && PREV_MILESTONE_HASH=$(cat "$MILESTONE_SEED" 2>/dev/null)
+        if [[ -n "$PREV_MILESTONE_HASH" && "$CURRENT_MILESTONE_HASH" != "$PREV_MILESTONE_HASH" ]]; then
+            ACTION="MILESTONE_REPORT"
+            ACTION_DETAIL="milestone_changed=true"
+        fi
+        # Save initial snapshot if none exists
+        if [[ ! -f "$MILESTONE_SEED" ]]; then
+            echo "$CURRENT_MILESTONE_HASH" > "$MILESTONE_SEED"
+        fi
+    fi
+fi
 
 # --- 1. REPORT_DUE ---
-if [[ -f "$REPORT_MARKER" ]]; then
+if [[ "$ACTION" != "MILESTONE_REPORT" ]] && [[ -f "$REPORT_MARKER" ]]; then
     LAST_REPORT=$(aau_file_mtime "$REPORT_MARKER")
     REPORT_AGE=$(( NOW - LAST_REPORT ))
 else
     REPORT_AGE=$((REPORT_INTERVAL + 1))
 fi
-if [[ "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]; then
-    ACTION="REPORT_DUE"
-    ACTION_DETAIL="last_report_age=${REPORT_AGE}s"
+if [[ "$ACTION" != "MILESTONE_REPORT" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]; then
+    # Build state hash from all task statuses to detect actual changes
+    CURRENT_STATE=""
+    for MEMBER in $(aau_team_members); do
+        TF="$TEAM_DIR/$MEMBER/tasks.md"
+        if [[ -f "$TF" ]]; then
+            P=$(grep -c '\[PENDING\]' "$TF" 2>/dev/null || true)
+            I=$(grep -c '\[IN_PROGRESS\]' "$TF" 2>/dev/null || true)
+            D=$(grep -c '\[DONE\]' "$TF" 2>/dev/null || true)
+            E=$(grep -c '\[NEEDS_EVIDENCE\]' "$TF" 2>/dev/null || true)
+            CURRENT_STATE="${CURRENT_STATE}${MEMBER}:${P}/${I}/${D}/${E} "
+        fi
+    done
+    CURRENT_STATE_HASH=$(echo "$CURRENT_STATE" | aau_md5)
+    PREV_STATE_HASH=""
+    [[ -f "$REPORT_STATE_SEED" ]] && PREV_STATE_HASH=$(cat "$REPORT_STATE_SEED" 2>/dev/null)
+
+    if [[ "$CURRENT_STATE_HASH" != "$PREV_STATE_HASH" ]]; then
+        ACTION="REPORT_DUE"
+        ACTION_DETAIL="last_report_age=${REPORT_AGE}s,state_changed=true"
+    else
+        aau_log "report interval passed but no state change, skip"
+        aau_jlog "info" "report_skip_no_change" "\"age\":$REPORT_AGE"
+        # Touch marker to reset timer (avoid checking every 30min)
+        touch "$REPORT_MARKER"
+    fi
 fi
 
 # --- 2. DONE_FOLLOWUP ---
@@ -114,7 +160,42 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
     done
 fi
 
-# --- 4. IDLE_ALL ---
+# --- 4. APPROVAL_REMINDER ---
+if [[ "$ACTION" == "NO_ACTION" && -f "$STATUS_FILE" ]]; then
+    if grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+        # Check if reminder is due (every APPROVAL_REMINDER_INTERVAL)
+        SEND_REMINDER=false
+        if [[ -f "$APPROVAL_REMINDER_MARKER" ]]; then
+            LAST_REMINDER=$(aau_file_mtime "$APPROVAL_REMINDER_MARKER")
+            REMINDER_AGE=$(( NOW - LAST_REMINDER ))
+            if [[ "$REMINDER_AGE" -gt "$APPROVAL_REMINDER_INTERVAL" ]]; then
+                SEND_REMINDER=true
+            fi
+        else
+            SEND_REMINDER=true
+        fi
+        if [[ "$SEND_REMINDER" == "true" ]]; then
+            ACTION="APPROVAL_REMINDER"
+            ACTION_DETAIL="approval_pending=true"
+        else
+            # Block IDLE_ALL even if reminder not due
+            ACTION="NO_ACTION"
+            ACTION_DETAIL="approval_pending_waiting"
+        fi
+    fi
+fi
+
+# --- 5. IDLE_ALL (blocked by approval gate) ---
+if [[ "$ACTION" == "NO_ACTION" ]]; then
+    # Approval gate: if status.md has approval pending, do not enter IDLE_ALL
+    if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+        aau_log "approval pending in status.md, blocking IDLE_ALL"
+        aau_jlog "info" "approval_gate_block"
+        ACTION="NO_ACTION"
+        ACTION_DETAIL="approval_gate_blocked"
+    fi
+fi
+
 if [[ "$ACTION" == "NO_ACTION" ]]; then
     TOTAL_PENDING=0
     TOTAL_INPROG=0
@@ -143,12 +224,25 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
     exit 0
 fi
 
+# ─── APPROVAL_REMINDER → notify only, no Claude (zero-token) ───────────
+if [[ "$ACTION" == "APPROVAL_REMINDER" ]]; then
+    aau_notify "承認待ちのため保留中です。プロデューサーの承認をお待ちしています。/ Approval pending — awaiting producer approval."
+    touch "$APPROVAL_REMINDER_MARKER"
+    aau_log "=== approval reminder sent, exit ==="
+    aau_jlog "info" "approval_reminder_sent"
+    exit 0
+fi
+
 # ─── Render prompt from template ─────────────────────────────────────────
 cd "$AAU_PROJECT_ROOT"
 OUTFILE="${AAU_TMP}/${AAU_PREFIX}_director_autonomous_$$.out"
 
 # Map action to template and max_turns
 case "$ACTION" in
+    MILESTONE_REPORT)
+        TEMPLATE="director_milestone_report.txt"
+        MAX_TURNS="${AAU_DIRECTOR_MAX_TURNS_MILESTONE:-10}"
+        ;;
     REPORT_DUE)
         TEMPLATE="director_report.txt"
         MAX_TURNS="${AAU_DIRECTOR_MAX_TURNS_REPORT:-15}"
@@ -204,14 +298,13 @@ aau_log "launching Claude (action=$ACTION, max_turns=$MAX_TURNS)"
 aau_jlog "info" "claude_launch" "\"action\":\"$ACTION\",\"max_turns\":$MAX_TURNS"
 
 DIRECTOR_TOOLS="Read,Write,Edit,Bash"
-aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$AAU_CLAUDE" \
+aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
     --model "$AAU_MODEL" \
     --print \
     --permission-mode "$AAU_PERM" \
     --max-turns "$MAX_TURNS" \
     --tools "$DIRECTOR_TOOLS" \
-    --allowedTools "$DIRECTOR_TOOLS" \
-    "$PROMPT"
+    --allowedTools "$DIRECTOR_TOOLS"
 
 EXIT_CODE=$?
 OUTPUT=$(cat "$OUTFILE" 2>/dev/null)
@@ -230,8 +323,14 @@ else
     aau_jlog "info" "session_succeeded" "\"action\":\"$ACTION\""
 
     case "$ACTION" in
+        MILESTONE_REPORT)
+            # Update milestone snapshot so same change doesn't fire again
+            echo "$CURRENT_MILESTONE_HASH" > "$MILESTONE_SEED"
+            ;;
         REPORT_DUE)
             touch "$REPORT_MARKER"
+            # Save state hash to prevent duplicate reports when nothing changed
+            echo "$CURRENT_STATE_HASH" > "$REPORT_STATE_SEED"
             ;;
         DONE_FOLLOWUP)
             DONE_NOW=""
