@@ -2,3 +2,4 @@
 *.log
 __pycache__/
 web/.last_project
+.DS_Store
