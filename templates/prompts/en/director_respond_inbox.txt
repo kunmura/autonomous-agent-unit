@@ -1,0 +1,12 @@
+Read team/director/inbox.md and respond to all entries with status PROCESSING.
+
+## Guidelines
+- Handle immediately what you can do yourself
+- Delegate to team members only for large deliverables
+- For simple questions, respond directly
+
+## Team Members
+{{members_list}}
+
+## After completion
+Update inbox.md status from PROCESSING → READ.

@@ -1,0 +1,106 @@
+# =============================================================================
+# Autonomous Agent Unit (AAU) — Configuration
+# =============================================================================
+# このファイルをプロジェクトルートに aau.yaml としてコピーして編集してください。
+# Copy this file to your project root as aau.yaml and customize.
+# =============================================================================
+
+project:
+  name: "my-project"
+  # repo_path is auto-detected from aau.yaml location; override if needed
+  # repo_path: "/path/to/project"
+
+runtime:
+  claude_cli: "/opt/homebrew/bin/claude"
+  claude_model: "claude-sonnet-4-6"
+  permission_mode: "bypassPermissions"
+  tmp_dir: "/tmp"
+  # prefix for all temp files: /tmp/{prefix}_*
+  prefix: "myproj"
+
+team:
+  members:
+    - name: coder
+      role: "Implementation and testing"
+      timeout: 600
+      max_turns: 30
+      interval: 300
+      tools: "Read,Write,Edit,Bash,Grep,Glob"
+    - name: qa
+      role: "Quality assurance and test execution"
+      timeout: 600
+      max_turns: 30
+      interval: 300
+      tools: "Read,Write,Edit,Bash,Grep,Glob"
+  # ── Tool permissions per role (examples) ──
+  # researcher: "Read,Write,Edit,Bash,WebSearch,WebFetch"  ← Web search required
+  # analyst:    "Read,Write,Edit,Bash"
+  # writer:     "Read,Write,Edit"
+  # critic:     "Read,Write,Edit,WebSearch,WebFetch"        ← Fact-checking requires web
+  # director:   "Read,Write,Edit,Bash"                      ← curl for Slack
+
+director:
+  autonomous_interval: 1800
+  responder_interval: 120
+  timeout: 600
+  max_turns:
+    report: 15
+    followup: 20
+    stale: 10
+    idle: 25
+    respond: 40
+  report_interval: 7200
+  stale_threshold: 1800
+  daily_max_invocations: 20
+  quiet_hours_start: 0
+  quiet_hours_end: 8
+
+scheduling:
+  task_monitor_interval: 300
+  health_monitor_interval: 600
+
+locks:
+  max_age: 1800
+
+retry:
+  max_retries: 3
+  backoff_base: 300
+
+notification:
+  # slack | discord | webhook | none
+  plugin: "none"
+  report_style: "short"
+  report_max_chars: 50
+  # Alert when project cost exceeds this amount (USD)
+  cost_alert_threshold: 10
+
+slack:
+  # Required for Slack two-way communication (producer <-> director)
+  producer_id: ""    # Slack user ID of the producer (e.g. UK25H386P)
+  bot_id: ""         # Slack bot user ID (e.g. U0AK6BHNV6H)
+
+local_llm:
+  enabled: false
+  url: "http://localhost:11434/api/generate"
+  classifier_model: "gemma2:9b"
+  drafter_model: "qwen2.5-coder:32b"
+  classifier_timeout: 30
+  drafter_timeout: 300
+
+prompts:
+  language: "ja"
+  # custom_dir: "prompts/"  # override template prompts
+
+health:
+  critical_patterns:
+    - "Reached max turns"
+    - "permission denied"
+    - "Edit not allowed"
+    - "Tool not allowed"
+    - "Write not allowed"
+  warning_patterns:
+    - "TESTS FAILED"
+    - "assert failed"
+    - "Error: "
+    - "BLOCKED"
+  stale_threshold: 1500

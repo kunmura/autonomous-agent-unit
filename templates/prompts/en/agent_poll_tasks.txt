@@ -1,0 +1,11 @@
+Read team/{{member}}/tasks.md and process PENDING tasks.
+
+## Protocol
+1. Pick one PENDING task and change its status to IN_PROGRESS
+2. Execute the work described in the task
+3. When done, change status to DONE
+4. Record results in team/{{member}}/progress.md
+
+## Notes
+- Focus on one task per session
+- If unable to complete, record progress in progress.md and leave status as IN_PROGRESS

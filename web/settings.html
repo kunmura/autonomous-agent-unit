@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AAU Settings</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #1c2128;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #7d8590;
+  --green: #3fb950;
+  --yellow: #d29922;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+  --orange: #ffa657;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Cascadia Code', 'Menlo', monospace;
+  font-size: 13px;
+  padding: 24px;
+  min-height: 100vh;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+header h1 { font-size: 16px; color: var(--blue); }
+header a { color: var(--muted); text-decoration: none; font-size: 12px; }
+header a:hover { color: var(--blue); }
+.container { max-width: 700px; margin: 0 auto; }
+
+/* Sections */
+.section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  margin-bottom: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Fields */
+.field { margin-bottom: 14px; }
+.field label {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.field input, .field select {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.field input:focus, .field select:focus { border-color: var(--blue); }
+.field .hint { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+/* Members */
+.member-item {
+  display: grid;
+  grid-template-columns: 140px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.member-item input {
+  padding: 6px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.member-item input:focus { border-color: var(--blue); }
+.btn-rm {
+  width: 26px; height: 26px; border: none;
+  background: transparent; color: var(--muted);
+  font-size: 15px; cursor: pointer; border-radius: 4px;
+  display: flex; align-items: center; justify-content: center;
+}
+.btn-rm:hover { background: rgba(248,113,113,0.15); color: var(--red); }
+.btn-add {
+  width: 100%;
+  padding: 7px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.btn-add:hover { border-color: var(--blue); color: var(--blue); }
+
+/* Presets */
+.presets { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.preset {
+  padding: 4px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.preset:hover { border-color: var(--purple); color: var(--purple); }
+
+/* Plugin selector */
+.plugins { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 14px; }
+.plugin-opt {
+  padding: 10px;
+  text-align: center;
+  background: var(--surface2);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+.plugin-opt:hover { border-color: var(--muted); }
+.plugin-opt.sel { border-color: var(--blue); background: rgba(88,166,255,0.08); }
+.plugin-icon { font-size: 18px; display: block; margin-bottom: 4px; }
+.slack-fields, .webhook-fields { display: none; }
+.slack-fields.vis, .webhook-fields.vis { display: block; }
+
+/* Toggle */
+.toggle-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+}
+.toggle-label { font-size: 12px; }
+.toggle-sub { font-size: 10px; color: var(--muted); }
+.toggle { position: relative; width: 40px; height: 22px; cursor: pointer; }
+.toggle input { display: none; }
+.toggle .sl {
+  position: absolute; inset: 0;
+  background: var(--border); border-radius: 11px; transition: 0.3s;
+}
+.toggle .sl::before {
+  content: '';
+  position: absolute; left: 2px; top: 2px;
+  width: 18px; height: 18px;
+  background: var(--text); border-radius: 50%; transition: 0.3s;
+}
+.toggle input:checked + .sl { background: var(--blue); }
+.toggle input:checked + .sl::before { transform: translateX(18px); }
+
+/* Actions */
+.actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 20px;
+}
+.btn {
+  padding: 10px 24px;
+  border: none;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn-save { background: var(--blue); color: #fff; }
+.btn-save:hover { background: #70b8ff; }
+.btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-back { background: var(--surface2); color: var(--text); }
+.btn-back:hover { background: var(--border); }
+.status-msg { font-size: 12px; min-height: 20px; }
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+  border-radius: 50%; animation: spin 0.5s linear infinite;
+  margin-right: 6px; vertical-align: middle;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>AAU Settings</h1>
+    <span style="flex:1"></span>
+    <a href="/">Monitor</a>
+  </header>
+
+  <div id="loading" style="text-align:center;padding:40px;color:var(--muted)">Loading...</div>
+  <div id="content" style="display:none">
+
+    <!-- Project -->
+    <div class="section">
+      <div class="section-title">Project</div>
+      <div class="row">
+        <div class="field">
+          <label>Name</label>
+          <input type="text" id="projectName">
+        </div>
+        <div class="field">
+          <label>Path</label>
+          <input type="text" id="projectPath" disabled style="opacity:0.6">
+        </div>
+      </div>
+    </div>
+
+    <!-- Claude -->
+    <div class="section">
+      <div class="section-title">Claude</div>
+      <div class="row">
+        <div class="field">
+          <label>CLI Path</label>
+          <input type="text" id="claudeCli">
+        </div>
+        <div class="field">
+          <label>Model</label>
+          <select id="claudeModel">
+            <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+            <option value="claude-opus-4-6">Opus 4.6</option>
+            <option value="claude-haiku-4-5">Haiku 4.5</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Prefix</label>
+          <input type="text" id="prefix">
+        </div>
+        <div class="field">
+          <label>Language</label>
+          <select id="language">
+            <option value="ja">Japanese</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Team -->
+    <div class="section">
+      <div class="section-title">Team Members</div>
+      <div class="presets">
+        <button class="preset" onclick="applyPreset('dev')">Dev</button>
+        <button class="preset" onclick="applyPreset('research')">Research</button>
+        <button class="preset" onclick="applyPreset('fullstack')">Fullstack</button>
+        <button class="preset" onclick="applyPreset('planning')">Planning</button>
+      </div>
+      <div id="memberList"></div>
+      <button class="btn-add" onclick="addMember()">+ Add Member</button>
+    </div>
+
+    <!-- Notification -->
+    <div class="section">
+      <div class="section-title">Notification</div>
+      <div class="plugins">
+        <div class="plugin-opt" data-p="none" onclick="setPlugin('none')"><span class="plugin-icon">-</span>None</div>
+        <div class="plugin-opt" data-p="slack" onclick="setPlugin('slack')"><span class="plugin-icon">#</span>Slack</div>
+        <div class="plugin-opt" data-p="discord" onclick="setPlugin('discord')"><span class="plugin-icon">D</span>Discord</div>
+        <div class="plugin-opt" data-p="webhook" onclick="setPlugin('webhook')"><span class="plugin-icon">{}</span>Webhook</div>
+      </div>
+      <div class="slack-fields" id="slackFields">
+        <div class="field">
+          <label>Bot Token (xoxb-)</label>
+          <input type="text" id="slackToken" placeholder="xoxb-...">
+        </div>
+        <div class="field">
+          <label>App-Level Token (xapp-)</label>
+          <input type="text" id="slackAppToken" placeholder="xapp-...">
+          <div class="hint">Socket Mode用。Settings → Basic → App-Level Tokens で生成</div>
+        </div>
+        <div class="field">
+          <label>Channel ID</label>
+          <input type="text" id="slackChannel" placeholder="C0123456789">
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>Producer User ID</label>
+            <input type="text" id="slackProducerId" placeholder="UK25H386P">
+            <div class="hint">Profile → ... → Copy member ID</div>
+          </div>
+          <div class="field">
+            <label>Bot User ID</label>
+            <input type="text" id="slackBotId" placeholder="U0AK6BHNV6H">
+          </div>
+        </div>
+      </div>
+      <div class="webhook-fields" id="webhookFields">
+        <div class="field">
+          <label>Webhook URL</label>
+          <input type="text" id="webhookUrl" placeholder="https://...">
+        </div>
+      </div>
+    </div>
+
+    <!-- Options -->
+    <div class="section">
+      <div class="section-title">Options</div>
+      <div class="toggle-row">
+        <div>
+          <div class="toggle-label">Local LLM (Ollama)</div>
+          <div class="toggle-sub">Use local model for classification</div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="llmEnabled"><span class="sl"></span></label>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>Quiet Hours Start</label>
+          <select id="quietStart">
+            <option value="0">0:00</option><option value="1">1:00</option>
+            <option value="22">22:00</option><option value="23">23:00</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Quiet Hours End</label>
+          <select id="quietEnd">
+            <option value="6">6:00</option><option value="7">7:00</option>
+            <option value="8">8:00</option><option value="9">9:00</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="actions">
+      <a href="/" class="btn btn-back">Monitor</a>
+      <div>
+        <span class="status-msg" id="statusMsg"></span>
+        <button class="btn btn-save" id="saveBtn" onclick="saveConfig()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let _members = [];
+let _plugin = 'none';
+
+const PRESETS = {
+  dev: [{name:'coder',role:'Implementation and testing'},{name:'qa',role:'Quality assurance'}],
+  research: [{name:'researcher',role:'Information gathering'},{name:'analyst',role:'Data analysis and comparison'},{name:'critic',role:'Counter-arguments and risk assessment'},{name:'writer',role:'Report writing and documentation'}],
+  fullstack: [{name:'frontend',role:'UI/UX implementation'},{name:'backend',role:'API and server-side logic'},{name:'qa',role:'Testing'},{name:'designer',role:'Design system'}],
+  planning: [{name:'planner',role:'Project planning and task breakdown'},{name:'researcher',role:'Technical research'},{name:'writer',role:'Documentation and proposals'}],
+};
+
+function renderMembers() {
+  $('memberList').innerHTML = _members.map((m, i) => `
+    <div class="member-item">
+      <input type="text" value="${m.name}" placeholder="Name" onchange="_members[${i}].name=this.value">
+      <input type="text" value="${m.role||''}" placeholder="Role" onchange="_members[${i}].role=this.value">
+      <button class="btn-rm" onclick="rmMember(${i})">&times;</button>
+    </div>`).join('');
+}
+function addMember() { _members.push({name:'',role:''}); renderMembers(); }
+function rmMember(i) { if(_members.length>1){_members.splice(i,1);renderMembers();} }
+function applyPreset(k) { _members = PRESETS[k].map(m=>({...m})); renderMembers(); }
+
+function setPlugin(p) {
+  _plugin = p;
+  document.querySelectorAll('.plugin-opt').forEach(el => el.classList.toggle('sel', el.dataset.p===p));
+  $('slackFields').classList.toggle('vis', p==='slack');
+  $('webhookFields').classList.toggle('vis', p==='webhook');
+}
+
+function loadConfig() {
+  fetch('/api/config')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) { $('loading').textContent = 'Error: ' + d.error; return; }
+      $('projectName').value = d.project_name || '';
+      $('projectPath').value = d.project_path || '';
+      $('claudeCli').value = d.claude_cli || '';
+      $('claudeModel').value = d.claude_model || 'claude-sonnet-4-6';
+      $('prefix').value = d.prefix || '';
+      $('language').value = d.language || 'ja';
+      $('llmEnabled').checked = !!d.llm_enabled;
+      $('quietStart').value = d.quiet_start || '0';
+      $('quietEnd').value = d.quiet_end || '8';
+      $('slackToken').value = d.slack_token || '';
+      $('slackAppToken').value = d.slack_app_token || '';
+      $('slackChannel').value = d.slack_channel || '';
+      $('slackProducerId').value = d.slack_producer_id || '';
+      $('slackBotId').value = d.slack_bot_id || '';
+      $('webhookUrl').value = d.webhook_url || '';
+
+      _members = (d.members && d.members.length) ? d.members : [{name:'coder',role:'Implementation'}];
+      renderMembers();
+      setPlugin(d.notify_plugin || 'none');
+
+      $('loading').style.display = 'none';
+      $('content').style.display = 'block';
+    })
+    .catch(e => { $('loading').textContent = 'Error: ' + e.message; });
+}
+
+function getConfig() {
+  // Read member values from inputs
+  const items = $('memberList').querySelectorAll('.member-item');
+  const members = [];
+  items.forEach(el => {
+    const inputs = el.querySelectorAll('input');
+    const name = inputs[0].value.trim();
+    const role = inputs[1].value.trim();
+    if (name) members.push({name, role: role || 'General'});
+  });
+  return {
+    project_name: $('projectName').value.trim(),
+    project_path: $('projectPath').value.trim(),
+    claude_cli: $('claudeCli').value.trim(),
+    claude_model: $('claudeModel').value,
+    prefix: $('prefix').value.trim(),
+    language: $('language').value,
+    notify_plugin: _plugin,
+    llm_enabled: $('llmEnabled').checked,
+    quiet_start: parseInt($('quietStart').value),
+    quiet_end: parseInt($('quietEnd').value),
+    slack_token: $('slackToken').value.trim(),
+    slack_app_token: $('slackAppToken').value.trim(),
+    slack_channel: $('slackChannel').value.trim(),
+    slack_producer_id: $('slackProducerId').value.trim(),
+    slack_bot_id: $('slackBotId').value.trim(),
+    webhook_url: $('webhookUrl').value.trim(),
+    members,
+  };
+}
+
+async function saveConfig() {
+  const btn = $('saveBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Saving...';
+  $('statusMsg').textContent = '';
+
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(getConfig()),
+    });
+    const d = await res.json();
+    if (d.ok) {
+      $('statusMsg').innerHTML = '<span style="color:var(--green)">Saved</span>';
+    } else {
+      $('statusMsg').innerHTML = '<span style="color:var(--red)">' + d.error + '</span>';
+    }
+  } catch(e) {
+    $('statusMsg').innerHTML = '<span style="color:var(--red)">' + e.message + '</span>';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save';
+}
+
+loadConfig();
+</script>
+</body>
+</html>

@@ -1,0 +1,562 @@
+#!/usr/bin/env python3
+"""
+AAU Slack Monitor
+Slackチャンネルを監視し、プロデューサーのメッセージをDirectorのinbox.mdに転記する。
+Claudeを一切使わない。launchdから1分ごとに起動される。
+
+Usage:
+    python3 slack_monitor.py /path/to/project
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+import urllib.parse
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── 設定読み込み ─────────────────────────────────────────────────────
+def load_config(project_path: str) -> dict:
+    """aau.yaml と .env から設定を読み込む。"""
+    root = Path(project_path)
+    cfg = {
+        "project_root": root,
+        "project_name": "",
+        "prefix": "",
+        "slack_token": "",
+        "slack_channel": "",
+        "producer_id": "",
+        "bot_id": "",
+        "ollama_url": "http://localhost:11434/api/generate",
+        "ollama_model": "gemma2:9b",
+        "ollama_timeout": 30,
+        "llm_enabled": False,
+        "members": [],
+    }
+
+    # Parse aau.yaml
+    yaml_file = root / "aau.yaml"
+    if yaml_file.exists():
+        text = yaml_file.read_text()
+        in_project = False
+        in_runtime = False
+        in_members = False
+        in_local_llm = False
+        in_slack = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            # Top-level sections
+            if line and not line[0].isspace() and stripped.endswith(":"):
+                in_project = stripped == "project:"
+                in_runtime = stripped == "runtime:"
+                in_members = False
+                in_local_llm = stripped == "local_llm:"
+                in_slack = stripped == "slack:"
+                continue
+            if "members:" in stripped and not stripped.startswith("#"):
+                in_members = True
+                continue
+            if in_project and stripped.startswith("name:"):
+                cfg["project_name"] = stripped.split(":", 1)[1].strip().strip('"')
+            if in_runtime and stripped.startswith("prefix:"):
+                cfg["prefix"] = stripped.split(":", 1)[1].strip().strip('"')
+            if in_members:
+                if stripped.startswith("- name:"):
+                    cfg["members"].append(stripped.split(":", 1)[1].strip())
+                elif stripped and not stripped.startswith("role:") and not stripped.startswith("timeout:") and not stripped.startswith("max_turns:") and not stripped.startswith("interval:") and not stripped.startswith("-"):
+                    in_members = False
+            if in_local_llm:
+                if stripped.startswith("enabled:"):
+                    cfg["llm_enabled"] = stripped.split(":", 1)[1].strip() == "true"
+                if stripped.startswith("url:"):
+                    cfg["ollama_url"] = stripped.split(":", 1)[1].strip().strip('"')
+                if stripped.startswith("classifier_model:"):
+                    cfg["ollama_model"] = stripped.split(":", 1)[1].strip().strip('"')
+                if stripped.startswith("classifier_timeout:"):
+                    cfg["ollama_timeout"] = int(stripped.split(":", 1)[1].strip())
+            if in_slack:
+                if stripped.startswith("producer_id:"):
+                    cfg["producer_id"] = stripped.split(":", 1)[1].strip().strip('"')
+                if stripped.startswith("bot_id:"):
+                    cfg["bot_id"] = stripped.split(":", 1)[1].strip().strip('"')
+
+    # Load .env
+    env_file = root / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k == "SLACK_TOKEN":
+                    cfg["slack_token"] = v
+                elif k == "SLACK_CHANNEL":
+                    cfg["slack_channel"] = v
+                elif k == "SLACK_PRODUCER_ID":
+                    cfg["producer_id"] = v
+                elif k == "SLACK_BOT_ID":
+                    cfg["bot_id"] = v
+
+    return cfg
+
+
+# ── インテント定義 ────────────────────────────────────────────────────
+STATUS_QUERY_PHRASES = [
+    "システム状態", "システムの状態", "状態教えて", "状況教えて", "状況",
+    "どうなってる", "進捗教えて", "進捗", "ステータス", "今どうなってる",
+    "チームの状況", "タスクどうなった", "何してる", "動いてる",
+    "status", "progress",
+]
+
+REACTION_PHRASES = [
+    "ok", "ｏｋ", "了解", "ありがとう", "いいね", "👍", "🙏", "✅",
+    "なるほど", "わかった", "わかりました", "承知", "おｋ",
+]
+
+PROMISE_PHRASES = [
+    "のちほど作成", "のちほど報告", "後で作成", "後ほど作成", "後ほど報告",
+    "お送りします", "送ります", "報告します", "作成します", "作ります",
+    "着手します", "動かします", "起動します", "完成次第",
+]
+
+PROMISE_EXCLUDE = [
+    "ディレクターが後ほど対応します",
+    "確認します。ディレクターが",
+]
+
+
+# ── ユーティリティ ────────────────────────────────────────────────────
+_cfg = {}
+_log_file = None
+_jsonl_file = None
+
+
+def init(cfg: dict):
+    global _cfg, _log_file, _jsonl_file
+    _cfg = cfg
+    prefix = cfg["prefix"]
+    _log_file = Path(f"/tmp/{prefix}_slack_monitor.log")
+    _jsonl_file = Path(f"/tmp/{prefix}_slack_monitor.jsonl")
+
+
+def log(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(_log_file, "a") as f:
+        f.write(f"[{ts}] {msg}\n")
+
+
+def jlog(level: str, event: str, **kwargs):
+    record = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "level": level, "event": event, **kwargs,
+    }
+    with open(_jsonl_file, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def slack_get(endpoint: str, params: dict) -> dict:
+    qs = urllib.parse.urlencode(params)
+    url = f"https://slack.com/api/{endpoint}?{qs}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {_cfg['slack_token']}"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def slack_post(text: str):
+    payload = json.dumps({"channel": _cfg["slack_channel"], "text": text}).encode()
+    req = urllib.request.Request(
+        "https://slack.com/api/chat.postMessage",
+        data=payload,
+        headers={"Authorization": f"Bearer {_cfg['slack_token']}",
+                 "Content-Type": "application/json"},
+    )
+    urllib.request.urlopen(req, timeout=10)
+
+
+# ── インテント判定 ────────────────────────────────────────────────────
+def detect_intent(text: str) -> str:
+    text_lower = text.lower().strip()
+    if len(text) <= 10 and any(p in text_lower for p in REACTION_PHRASES):
+        return "reaction"
+    ascii_chars = sum(1 for c in text if ord(c) < 128 and c.strip())
+    if len(text) <= 5 and ascii_chars == 0:
+        return "reaction"
+    if any(p in text for p in STATUS_QUERY_PHRASES):
+        return "status"
+    return "task"
+
+
+# ── Ollama分類 ────────────────────────────────────────────────────────
+def ollama_classify(text: str) -> dict:
+    if not _cfg.get("llm_enabled"):
+        return {
+            "importance": "medium",
+            "summary": text[:50],
+            "auto_reply": "確認します。ディレクターが後ほど対応します。",
+        }
+
+    prompt = f"""You are a simple Slack notification bot.
+A message was sent by the producer (your boss).
+
+Message: {text[:400]}
+
+Respond with JSON only:
+{{
+  "importance": "high",
+  "summary": "日本語で1文の要約（50字以内）",
+  "auto_reply": "確認します。ディレクターが後ほど対応します。"
+}}
+
+Rules:
+- "high": questions, requests, instructions
+- "medium": general chat
+- "low": simple reactions ("OK", "了解", emoji)
+- auto_reply for high/medium: EXACTLY "確認します。ディレクターが後ほど対応します。"
+- auto_reply for low: EXACTLY "👍"
+"""
+    body = json.dumps({
+        "model": _cfg["ollama_model"], "prompt": prompt, "stream": False
+    }).encode()
+    req = urllib.request.Request(
+        _cfg["ollama_url"], data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_cfg["ollama_timeout"]) as resp:
+            data = json.loads(resp.read())
+        raw = data.get("response", "{}")
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except Exception as e:
+        log(f"ollama error: {e}")
+    return {
+        "importance": "medium",
+        "summary": text[:50],
+        "auto_reply": "確認します。ディレクターが後ほど対応します。",
+    }
+
+
+# ── システム状態収集 ──────────────────────────────────────────────────
+def gather_system_status() -> str:
+    root = _cfg["project_root"]
+    name = _cfg["project_name"]
+    lines = []
+
+    # launchd
+    try:
+        result = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+        services = [l for l in result.stdout.splitlines() if f"ai.{name}" in l]
+        running = sum(1 for l in services if l.split("\t")[0] != "-")
+        lines.append(f"launchd: {len(services)} services ({running} running)")
+    except Exception:
+        lines.append("launchd: unavailable")
+
+    # Triggers
+    prefix = _cfg["prefix"]
+    triggers = [t.name.replace(f"{prefix}_trigger_", "")
+                for t in Path("/tmp").glob(f"{prefix}_trigger_*")]
+    lines.append(f"Queue: {', '.join(triggers)}" if triggers else "Queue: empty (all idle)")
+
+    # Team members
+    for member in _cfg["members"]:
+        tasks_path = root / f"team/{member}/tasks.md"
+        if not tasks_path.exists():
+            continue
+        try:
+            task_lines = tasks_path.read_text().splitlines()
+            in_prog = [l.strip() for l in task_lines if "[IN_PROGRESS]" in l]
+            pending = [l.strip() for l in task_lines if "[PENDING]" in l]
+            done = [l.strip() for l in task_lines if "[DONE]" in l]
+
+            if in_prog or pending:
+                parts = []
+                for t in in_prog[:2]:
+                    parts.append(f"  🔄 {t[:60]}")
+                for t in pending[:3]:
+                    parts.append(f"  ⏳ {t[:60]}")
+                lines.append(f"{member}:")
+                lines.extend(parts)
+            else:
+                last = done[-1][:50] if done else "none"
+                lines.append(f"{member}: ✅ all done (last: {last})")
+        except Exception:
+            lines.append(f"{member}: error reading tasks")
+
+    # Director inbox
+    inbox_path = root / "team/director/inbox.md"
+    if inbox_path.exists():
+        try:
+            inbox_text = inbox_path.read_text()
+            unread = inbox_text.count("ステータス: UNREAD") + inbox_text.count("ステータス: PROCESSING")
+            lines.append(f"director: {unread} unread inbox" if unread else "director: inbox clear")
+        except Exception:
+            pass
+
+    return "\n".join(lines)
+
+
+def format_status_report(raw: str) -> str:
+    dt = datetime.now().strftime("%H:%M")
+    return f"*System Status* ({dt})\n{raw}\n— _by Bot (auto)_"
+
+
+# ── State管理 ────────────────────────────────────────────────────────
+def state_file() -> Path:
+    return _cfg["project_root"] / "team/director/last_check.md"
+
+
+def read_state() -> dict:
+    state = {"slack_ts": "0"}
+    sf = state_file()
+    if not sf.exists():
+        return state
+    content = sf.read_text()
+    ts_match = re.search(r"last_ts:\s*([\d.]+)", content)
+    if ts_match:
+        state["slack_ts"] = ts_match.group(1)
+    for member in _cfg["members"]:
+        for ftype in ["tasks", "progress"]:
+            key = f"{member}_{ftype}"
+            m = re.search(rf"{key}:\s*(\d+)", content)
+            if m:
+                state[key] = int(m.group(1))
+    return state
+
+
+def write_state(state: dict):
+    lines = [
+        "# Last Check State\n",
+        "<!-- Slack Monitor auto-updates this file. -->\n\n",
+        "## Slack\n",
+        f"last_ts: {state['slack_ts']}\n\n",
+        "## Files\n",
+    ]
+    for member in _cfg["members"]:
+        for ftype in ["tasks", "progress"]:
+            key = f"{member}_{ftype}"
+            if key in state:
+                lines.append(f"{key}: {state[key]}\n")
+    state_file().write_text("".join(lines))
+
+
+# ── inbox書き込み ────────────────────────────────────────────────────
+def append_inbox(entry: str):
+    inbox = _cfg["project_root"] / "team/director/inbox.md"
+    with open(inbox, "a") as f:
+        f.write(entry)
+
+
+# ── Slack監視 ────────────────────────────────────────────────────────
+def check_slack(state: dict) -> str:
+    last_ts = state.get("slack_ts", "0")
+    producer_id = _cfg.get("producer_id", "")
+
+    if not producer_id:
+        log("WARN: no producer_id configured, skip Slack check")
+        return last_ts
+
+    all_messages = []
+    cursor = None
+    for _ in range(5):
+        params = {"channel": _cfg["slack_channel"], "limit": 100, "oldest": last_ts}
+        if cursor:
+            params["cursor"] = cursor
+        try:
+            data = slack_get("conversations.history", params)
+        except Exception as e:
+            log(f"Slack API error: {e}")
+            return last_ts
+        all_messages.extend(data.get("messages", []))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            break
+
+    producer_msgs = [m for m in all_messages if m.get("user") == producer_id]
+    producer_msgs.sort(key=lambda m: float(m.get("ts", 0)))
+
+    if not producer_msgs:
+        return last_ts
+
+    new_latest_ts = last_ts
+    for msg in producer_msgs:
+        ts = msg["ts"]
+        text = msg.get("text", "")
+        dt = datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+
+        log(f"Slack message from producer: {text[:60]}")
+        intent = detect_intent(text)
+        log(f"  → intent: {intent}")
+        jlog("info", "message_received", intent=intent, text_len=len(text))
+
+        # REACTION → skip
+        if intent == "reaction":
+            log("  → reaction, skipped")
+            new_latest_ts = ts
+            continue
+
+        # STATUS → auto-reply with system status
+        if intent == "status":
+            log("  → status query, auto-reply")
+            jlog("info", "status_query_auto")
+            raw = gather_system_status()
+            reply = format_status_report(raw)
+            try:
+                slack_post(reply)
+                log("  → status reply posted")
+            except Exception as e:
+                log(f"  → status reply error: {e}")
+            new_latest_ts = ts
+            continue
+
+        # TASK → classify → inbox → director-responder handles
+        classification = ollama_classify(text)
+        summary = classification.get("summary", text[:50])
+        auto_reply = classification.get("auto_reply", "確認します。ディレクターが後ほど対応します。")
+
+        # Auto-reply
+        try:
+            slack_post(f"{auto_reply}\n— _by Bot (auto)_")
+            log("  → auto reply posted")
+        except Exception as e:
+            log(f"  → auto reply error: {e}")
+
+        # Write to inbox
+        entry = f"""
+## [{dt}] Slack: Producer 🔴 **[Action Required]**
+> {text}
+
+**Summary**: {summary}
+**Auto-reply**: {auto_reply[:100]}
+ステータス: UNREAD
+
+"""
+        append_inbox(entry)
+        log("  → written to inbox as UNREAD")
+        jlog("info", "task_written_to_inbox", summary=summary[:80])
+        new_latest_ts = ts
+
+    return new_latest_ts
+
+
+# ── チームファイル監視 ────────────────────────────────────────────────
+def check_team_files(state: dict) -> dict:
+    root = _cfg["project_root"]
+    updates = {}
+
+    for member in _cfg["members"]:
+        for ftype in ["tasks", "progress"]:
+            key = f"{member}_{ftype}"
+            path = root / f"team/{member}/{ftype}.md"
+            if not path.exists():
+                continue
+            mtime = int(path.stat().st_mtime)
+            last_mtime = state.get(key, 0)
+
+            if mtime <= last_mtime:
+                updates[key] = last_mtime
+                continue
+
+            try:
+                lines = path.read_text().splitlines()[:100]
+            except Exception:
+                updates[key] = mtime
+                continue
+
+            blocked = [l.strip() for l in lines if "[BLOCKED]" in l]
+            if blocked:
+                dt = datetime.now().strftime("%Y-%m-%d %H:%M")
+                entry = f"""
+## [{dt}] ⚠️ BLOCKED: {member} ({ftype})
+{blocked[-1][:80]}
+ステータス: UNREAD
+
+"""
+                append_inbox(entry)
+                log(f"  → BLOCKED detected: {member}/{ftype}")
+
+            updates[key] = mtime
+
+    return updates
+
+
+# ── Bot約束追跡 ──────────────────────────────────────────────────────
+def scan_bot_promises(state: dict):
+    bot_id = _cfg.get("bot_id", "")
+    if not bot_id:
+        return
+
+    last_ts = state.get("slack_ts", "0")
+    try:
+        data = slack_get("conversations.history", {
+            "channel": _cfg["slack_channel"], "limit": 100, "oldest": last_ts,
+        })
+    except Exception:
+        return
+
+    promised_path = _cfg["project_root"] / "team/director/promised.md"
+    existing = ""
+    try:
+        existing = promised_path.read_text()
+    except Exception:
+        pass
+
+    for msg in data.get("messages", []):
+        if msg.get("user") != bot_id:
+            continue
+        text = msg.get("text", "")
+        ts = msg.get("ts", "0")
+        dt = datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M")
+
+        if any(ex in text for ex in PROMISE_EXCLUDE):
+            continue
+
+        for phrase in PROMISE_PHRASES:
+            if phrase in text:
+                if ts in existing:
+                    break
+                idx = text.find(phrase)
+                promise_text = text[max(0, idx - 15):idx + 40].strip()
+                entry = f"\n## [PENDING] {dt} — {promise_text[:80]}\n> {text[:120]}\n\n"
+                with open(promised_path, "a") as f:
+                    f.write(entry)
+                log(f"  → promise detected: {promise_text[:40]}")
+                break
+
+
+# ── メイン ────────────────────────────────────────────────────────────
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} /path/to/project")
+        sys.exit(1)
+
+    project_path = sys.argv[1]
+    cfg = load_config(project_path)
+
+    if not cfg["slack_token"] or not cfg["slack_channel"]:
+        print("WARN: SLACK_TOKEN or SLACK_CHANNEL not configured, exiting.")
+        sys.exit(0)
+
+    init(cfg)
+    log("=== slack_monitor start ===")
+
+    state = read_state()
+
+    new_ts = check_slack(state)
+    state["slack_ts"] = new_ts
+
+    scan_bot_promises(state)
+
+    file_updates = check_team_files(state)
+    state.update(file_updates)
+
+    write_state(state)
+    log("=== done ===")
+
+
+if __name__ == "__main__":
+    main()

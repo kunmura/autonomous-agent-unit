@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AAU Setup Wizard</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242836;
+    --border: #2e3345;
+    --text: #e4e6f0;
+    --text2: #8b8fa8;
+    --accent: #6c8aff;
+    --accent-hover: #8aa4ff;
+    --green: #4ade80;
+    --red: #f87171;
+    --orange: #fb923c;
+    --radius: 12px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  .container {
+    max-width: 700px;
+    margin: 0 auto;
+    padding: 40px 24px;
+  }
+  header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+  header h1 {
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
+  }
+  header p {
+    color: var(--text2);
+    font-size: 15px;
+  }
+  /* Progress bar */
+  .progress {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 40px;
+  }
+  .progress-step {
+    flex: 1;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    transition: background 0.3s;
+  }
+  .progress-step.active { background: var(--accent); }
+  .progress-step.done { background: var(--green); }
+
+  /* Steps */
+  .step { display: none; }
+  .step.active { display: block; animation: fadeIn 0.3s; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+  .step-title {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .step-desc {
+    color: var(--text2);
+    font-size: 14px;
+    margin-bottom: 28px;
+  }
+
+  /* Form elements */
+  .field {
+    margin-bottom: 20px;
+  }
+  .field label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text2);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .field input, .field select {
+    width: 100%;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+    transition: border 0.2s;
+  }
+  .field input:focus, .field select:focus {
+    border-color: var(--accent);
+  }
+  .field .hint {
+    font-size: 12px;
+    color: var(--text2);
+    margin-top: 4px;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  /* Member list */
+  .member-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .member-item {
+    display: grid;
+    grid-template-columns: 1fr 1.5fr auto;
+    gap: 10px;
+    align-items: center;
+    padding: 12px 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .member-item input {
+    padding: 8px 10px;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+  }
+  .member-item input:focus { border-color: var(--accent); }
+  .btn-remove {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: transparent;
+    color: var(--text2);
+    font-size: 18px;
+    cursor: pointer;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .btn-remove:hover { background: rgba(248,113,113,0.15); color: var(--red); }
+  .btn-add {
+    padding: 10px;
+    background: transparent;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    color: var(--text2);
+    font-size: 14px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-add:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Notification plugin */
+  .plugin-options {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-bottom: 20px;
+  }
+  .plugin-option {
+    padding: 14px 10px;
+    text-align: center;
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 14px;
+  }
+  .plugin-option:hover { border-color: var(--text2); }
+  .plugin-option.selected { border-color: var(--accent); background: rgba(108,138,255,0.08); }
+  .plugin-option .icon { font-size: 24px; display: block; margin-bottom: 6px; }
+  .plugin-extra { display: none; }
+  .plugin-extra.visible { display: block; }
+
+  /* Toggle */
+  .toggle-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+  .toggle-row .toggle-label { font-size: 14px; }
+  .toggle-row .toggle-sublabel { font-size: 12px; color: var(--text2); }
+  .toggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    cursor: pointer;
+  }
+  .toggle input { display: none; }
+  .toggle .slider {
+    position: absolute;
+    inset: 0;
+    background: var(--border);
+    border-radius: 12px;
+    transition: 0.3s;
+  }
+  .toggle .slider::before {
+    content: '';
+    position: absolute;
+    left: 3px;
+    top: 3px;
+    width: 18px;
+    height: 18px;
+    background: var(--text);
+    border-radius: 50%;
+    transition: 0.3s;
+  }
+  .toggle input:checked + .slider { background: var(--accent); }
+  .toggle input:checked + .slider::before { transform: translateX(20px); }
+
+  /* Buttons */
+  .actions {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 36px;
+    gap: 12px;
+  }
+  .btn {
+    padding: 12px 28px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-secondary {
+    background: var(--surface2);
+    color: var(--text);
+  }
+  .btn-secondary:hover { background: var(--border); }
+  .btn-primary {
+    background: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Review */
+  .review-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .review-card h3 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text2);
+    margin-bottom: 12px;
+  }
+  .review-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    font-size: 14px;
+  }
+  .review-row .label { color: var(--text2); }
+
+  /* Result */
+  .result-card {
+    background: var(--surface);
+    border: 1px solid var(--green);
+    border-radius: 10px;
+    padding: 24px;
+    text-align: center;
+  }
+  .result-card .check {
+    width: 56px;
+    height: 56px;
+    background: rgba(74,222,128,0.12);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 16px;
+    font-size: 28px;
+    color: var(--green);
+  }
+  .result-card h2 { margin-bottom: 8px; font-size: 20px; }
+  .result-card p { color: var(--text2); font-size: 14px; margin-bottom: 16px; }
+  .result-details {
+    text-align: left;
+    background: var(--surface2);
+    border-radius: 8px;
+    padding: 16px;
+    font-size: 13px;
+    font-family: 'SF Mono', monospace;
+    color: var(--text2);
+    white-space: pre-wrap;
+    max-height: 200px;
+    overflow-y: auto;
+    margin-top: 16px;
+  }
+  .error-card {
+    border-color: var(--red);
+  }
+  .error-card .check {
+    background: rgba(248,113,113,0.12);
+    color: var(--red);
+  }
+  /* Spinner */
+  .spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>Autonomous Agent Unit</h1>
+    <p>セットアップウィザード</p>
+  </header>
+
+  <div class="progress" id="progressBar">
+    <div class="progress-step active"></div>
+    <div class="progress-step"></div>
+    <div class="progress-step"></div>
+    <div class="progress-step"></div>
+    <div class="progress-step"></div>
+  </div>
+
+  <!-- Step 1: Project -->
+  <div class="step active" data-step="0">
+    <div class="step-title">プロジェクト設定</div>
+    <div class="step-desc">エージェントが作業する対象プロジェクトの情報</div>
+    <div class="field">
+      <label>プロジェクト名</label>
+      <input type="text" id="projectName" placeholder="my-project">
+    </div>
+    <div class="field">
+      <label>プロジェクトパス</label>
+      <input type="text" id="projectPath" placeholder="/Users/you/git/my-project">
+      <div class="hint">aau.yaml と team/ ディレクトリがここに作られます</div>
+    </div>
+    <div class="actions">
+      <div></div>
+      <button class="btn btn-primary" onclick="nextStep()">次へ</button>
+    </div>
+  </div>
+
+  <!-- Step 2: Claude -->
+  <div class="step" data-step="1">
+    <div class="step-title">Claude 設定</div>
+    <div class="step-desc">Claude Code CLIの設定</div>
+    <div class="field">
+      <label>Claude CLI パス</label>
+      <input type="text" id="claudeCli" placeholder="/opt/homebrew/bin/claude">
+    </div>
+    <div class="field">
+      <label>モデル</label>
+      <select id="claudeModel">
+        <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (推奨 / バランス型)</option>
+        <option value="claude-opus-4-6">Claude Opus 4.6 (高精度)</option>
+        <option value="claude-haiku-4-5">Claude Haiku 4.5 (高速 / 低コスト)</option>
+      </select>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label>ファイルプレフィックス</label>
+        <input type="text" id="prefix" placeholder="myproj">
+        <div class="hint">/tmp/{prefix}_* で使用</div>
+      </div>
+      <div class="field">
+        <label>言語</label>
+        <select id="language">
+          <option value="ja">日本語</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="prevStep()">戻る</button>
+      <button class="btn btn-primary" onclick="nextStep()">次へ</button>
+    </div>
+  </div>
+
+  <!-- Step 3: Team -->
+  <div class="step" data-step="2">
+    <div class="step-title">チームメンバー</div>
+    <div class="step-desc">AIエージェントのチーム構成を定義</div>
+    <div class="member-list" id="memberList">
+      <div class="member-item">
+        <input type="text" value="coder" placeholder="名前" class="member-name">
+        <input type="text" value="Implementation and testing" placeholder="役割" class="member-role">
+        <button class="btn-remove" onclick="removeMember(this)">&times;</button>
+      </div>
+      <div class="member-item">
+        <input type="text" value="qa" placeholder="名前" class="member-name">
+        <input type="text" value="Quality assurance" placeholder="役割" class="member-role">
+        <button class="btn-remove" onclick="removeMember(this)">&times;</button>
+      </div>
+    </div>
+    <button class="btn-add" onclick="addMember()">+ メンバーを追加</button>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="prevStep()">戻る</button>
+      <button class="btn btn-primary" onclick="nextStep()">次へ</button>
+    </div>
+  </div>
+
+  <!-- Step 4: Notification & Options -->
+  <div class="step" data-step="3">
+    <div class="step-title">通知とオプション</div>
+    <div class="step-desc">通知先やその他の設定</div>
+
+    <div class="field">
+      <label>通知プラグイン</label>
+    </div>
+    <div class="plugin-options">
+      <div class="plugin-option selected" data-plugin="none" onclick="selectPlugin('none')">
+        <span class="icon">-</span>
+        なし
+      </div>
+      <div class="plugin-option" data-plugin="slack" onclick="selectPlugin('slack')">
+        <span class="icon">#</span>
+        Slack
+      </div>
+      <div class="plugin-option" data-plugin="discord" onclick="selectPlugin('discord')">
+        <span class="icon">D</span>
+        Discord
+      </div>
+      <div class="plugin-option" data-plugin="webhook" onclick="selectPlugin('webhook')">
+        <span class="icon">{}</span>
+        Webhook
+      </div>
+    </div>
+    <div class="plugin-extra" id="slackExtra">
+      <div class="field">
+        <label>Slack Bot Token</label>
+        <input type="text" id="slackToken" placeholder="xoxb-...">
+      </div>
+      <div class="field">
+        <label>Slack Channel ID</label>
+        <input type="text" id="slackChannel" placeholder="C0123456789">
+      </div>
+      <div class="field">
+        <label>Producer Slack User ID</label>
+        <input type="text" id="slackProducerId" placeholder="UK25H386P">
+        <div class="hint">Slackプロフィール → ... → メンバーIDをコピー</div>
+      </div>
+      <div class="field">
+        <label>Bot User ID</label>
+        <input type="text" id="slackBotId" placeholder="U0AK6BHNV6H">
+        <div class="hint">Slack API → Your App → Bot User ID</div>
+      </div>
+    </div>
+    <div class="plugin-extra" id="webhookExtra">
+      <div class="field">
+        <label>Webhook URL</label>
+        <input type="text" id="webhookUrl" placeholder="https://...">
+      </div>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">ローカルLLM (Ollama)</div>
+        <div class="toggle-sublabel">分類・下書きにローカルモデルを使用</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="llmEnabled">
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>静粛時間 開始</label>
+        <select id="quietStart">
+          <option value="0" selected>0:00</option>
+          <option value="1">1:00</option>
+          <option value="22">22:00</option>
+          <option value="23">23:00</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>静粛時間 終了</label>
+        <select id="quietEnd">
+          <option value="6">6:00</option>
+          <option value="7">7:00</option>
+          <option value="8" selected>8:00</option>
+          <option value="9">9:00</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="toggle-row">
+      <div>
+        <div class="toggle-label">サービスをインストール</div>
+        <div class="toggle-sublabel" id="platformLabel">launchd / systemd に登録して自動実行</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="installServices" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="prevStep()">戻る</button>
+      <button class="btn btn-primary" onclick="nextStep()">次へ</button>
+    </div>
+  </div>
+
+  <!-- Step 5: Review -->
+  <div class="step" data-step="4">
+    <div class="step-title">確認</div>
+    <div class="step-desc">設定内容を確認して実行</div>
+    <div id="reviewContent"></div>
+    <div class="actions">
+      <button class="btn btn-secondary" onclick="prevStep()">戻る</button>
+      <button class="btn btn-primary" id="submitBtn" onclick="doSetup()">セットアップ実行</button>
+    </div>
+  </div>
+
+  <!-- Result -->
+  <div class="step" data-step="5">
+    <div id="resultContent"></div>
+  </div>
+</div>
+
+<script>
+let currentStep = 0;
+const totalSteps = 5;
+let detectedDefaults = {};
+
+// Auto-detect on load
+fetch('/api/detect', { method: 'POST' })
+  .then(r => r.json())
+  .then(data => {
+    detectedDefaults = data;
+    if (data.claude_cli) document.getElementById('claudeCli').value = data.claude_cli;
+    if (data.platform) {
+      const label = data.platform === 'macOS' ? 'launchd に登録して自動実行 (macOS)' : 'systemd に登録して自動実行 (Linux)';
+      document.getElementById('platformLabel').textContent = label;
+    }
+  })
+  .catch(() => {});
+
+function updateProgress() {
+  const steps = document.querySelectorAll('.progress-step');
+  steps.forEach((s, i) => {
+    s.className = 'progress-step';
+    if (i < currentStep) s.classList.add('done');
+    else if (i === currentStep) s.classList.add('active');
+  });
+}
+
+function showStep(n) {
+  document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+  document.querySelector(`.step[data-step="${n}"]`).classList.add('active');
+  currentStep = n;
+  updateProgress();
+}
+
+function nextStep() {
+  if (currentStep === 0) {
+    const name = document.getElementById('projectName').value.trim();
+    const path = document.getElementById('projectPath').value.trim();
+    if (!name || !path) { alert('プロジェクト名とパスを入力してください'); return; }
+    // Auto-fill prefix
+    const pfx = document.getElementById('prefix');
+    if (!pfx.value) pfx.value = name.slice(0, 10).toLowerCase().replace(/[\s-]/g, '_');
+  }
+  if (currentStep === 4) return; // review is last before submit
+  if (currentStep === 3) {
+    buildReview();
+  }
+  showStep(currentStep + 1);
+}
+
+function prevStep() {
+  if (currentStep > 0) showStep(currentStep - 1);
+}
+
+function addMember() {
+  const list = document.getElementById('memberList');
+  const item = document.createElement('div');
+  item.className = 'member-item';
+  item.innerHTML = `
+    <input type="text" placeholder="名前" class="member-name">
+    <input type="text" placeholder="役割" class="member-role">
+    <button class="btn-remove" onclick="removeMember(this)">&times;</button>
+  `;
+  list.appendChild(item);
+}
+
+function removeMember(btn) {
+  const list = document.getElementById('memberList');
+  if (list.children.length > 1) btn.parentElement.remove();
+}
+
+function selectPlugin(name) {
+  document.querySelectorAll('.plugin-option').forEach(o => o.classList.remove('selected'));
+  document.querySelector(`.plugin-option[data-plugin="${name}"]`).classList.add('selected');
+  document.querySelectorAll('.plugin-extra').forEach(e => e.classList.remove('visible'));
+  if (name === 'slack') document.getElementById('slackExtra').classList.add('visible');
+  if (name === 'webhook') document.getElementById('webhookExtra').classList.add('visible');
+}
+
+function getConfig() {
+  const members = [];
+  document.querySelectorAll('.member-item').forEach(item => {
+    const name = item.querySelector('.member-name').value.trim();
+    const role = item.querySelector('.member-role').value.trim();
+    if (name) members.push({ name, role: role || 'General' });
+  });
+  const plugin = document.querySelector('.plugin-option.selected')?.dataset.plugin || 'none';
+  return {
+    project_name: document.getElementById('projectName').value.trim(),
+    project_path: document.getElementById('projectPath').value.trim(),
+    claude_cli: document.getElementById('claudeCli').value.trim(),
+    claude_model: document.getElementById('claudeModel').value,
+    prefix: document.getElementById('prefix').value.trim(),
+    language: document.getElementById('language').value,
+    members,
+    notify_plugin: plugin,
+    slack_token: document.getElementById('slackToken').value.trim(),
+    slack_channel: document.getElementById('slackChannel').value.trim(),
+    slack_producer_id: document.getElementById('slackProducerId').value.trim(),
+    slack_bot_id: document.getElementById('slackBotId').value.trim(),
+    webhook_url: document.getElementById('webhookUrl').value.trim(),
+    llm_enabled: document.getElementById('llmEnabled').checked,
+    quiet_start: parseInt(document.getElementById('quietStart').value),
+    quiet_end: parseInt(document.getElementById('quietEnd').value),
+    install_services: document.getElementById('installServices').checked,
+  };
+}
+
+function buildReview() {
+  const cfg = getConfig();
+  const membersList = cfg.members.map(m => `${m.name} (${m.role})`).join(', ');
+  const modelLabels = {
+    'claude-sonnet-4-6': 'Sonnet 4.6',
+    'claude-opus-4-6': 'Opus 4.6',
+    'claude-haiku-4-5': 'Haiku 4.5',
+  };
+  document.getElementById('reviewContent').innerHTML = `
+    <div class="review-card">
+      <h3>プロジェクト</h3>
+      <div class="review-row"><span class="label">名前</span><span>${cfg.project_name}</span></div>
+      <div class="review-row"><span class="label">パス</span><span>${cfg.project_path}</span></div>
+      <div class="review-row"><span class="label">プレフィックス</span><span>${cfg.prefix}</span></div>
+    </div>
+    <div class="review-card">
+      <h3>Claude</h3>
+      <div class="review-row"><span class="label">CLI</span><span>${cfg.claude_cli}</span></div>
+      <div class="review-row"><span class="label">モデル</span><span>${modelLabels[cfg.claude_model] || cfg.claude_model}</span></div>
+      <div class="review-row"><span class="label">言語</span><span>${cfg.language === 'ja' ? '日本語' : 'English'}</span></div>
+    </div>
+    <div class="review-card">
+      <h3>チーム</h3>
+      <div class="review-row"><span class="label">メンバー</span><span>${membersList}</span></div>
+    </div>
+    <div class="review-card">
+      <h3>オプション</h3>
+      <div class="review-row"><span class="label">通知</span><span>${cfg.notify_plugin}</span></div>
+      <div class="review-row"><span class="label">ローカルLLM</span><span>${cfg.llm_enabled ? 'ON' : 'OFF'}</span></div>
+      <div class="review-row"><span class="label">静粛時間</span><span>${cfg.quiet_start}:00 - ${cfg.quiet_end}:00</span></div>
+      <div class="review-row"><span class="label">サービス登録</span><span>${cfg.install_services ? 'する' : 'しない'}</span></div>
+    </div>
+  `;
+}
+
+async function doSetup() {
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>セットアップ中...';
+
+  try {
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getConfig()),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      const details = [
+        `Config: ${data.config_file}`,
+        `Members: ${data.members.join(', ')}`,
+        data.scaffold_output,
+        data.install_output,
+      ].filter(Boolean).join('\n');
+      document.getElementById('resultContent').innerHTML = `
+        <div class="result-card">
+          <div class="check">&#10003;</div>
+          <h2>セットアップ完了</h2>
+          <p>${data.project_path} にAAU環境を構築しました</p>
+          <div style="text-align:left; margin-top:20px;">
+            <strong style="font-size:14px;">次のステップ:</strong>
+            <ol style="margin-top:8px; padding-left:20px; font-size:14px; color:var(--text2); line-height:1.8;">
+              <li>aau.yaml を確認・カスタマイズ</li>
+              <li>team/*/tasks.md にタスクを追加</li>
+              <li>エージェントが自動で作業を開始します</li>
+            </ol>
+          </div>
+          <div style="margin-top:20px;">
+            <a href="/monitor" class="btn btn-primary" style="display:inline-block;text-decoration:none;text-align:center;">モニタリング画面へ</a>
+          </div>
+          <div class="result-details">${details}</div>
+        </div>
+      `;
+    } else {
+      document.getElementById('resultContent').innerHTML = `
+        <div class="result-card error-card">
+          <div class="check">!</div>
+          <h2>エラー</h2>
+          <p>${data.error}</p>
+        </div>
+      `;
+    }
+    showStep(5);
+  } catch (e) {
+    alert('通信エラー: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'セットアップ実行';
+  }
+}
+</script>
+</body>
+</html>
