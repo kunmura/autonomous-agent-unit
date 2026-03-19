@@ -47,6 +47,19 @@ cat > "$TARGET/team/director/promised.md" << 'PROMISED'
 <!-- Status: [PENDING] | [DONE] -->
 PROMISED
 
+# Initialize last_check.md with current timestamp to avoid ingesting old Slack history
+CURRENT_TS=$(python3 -c "import time; print(time.time())" 2>/dev/null || date +%s)
+cat > "$TARGET/team/director/last_check.md" << LASTCHECK
+# Last Check State
+
+<!-- Slack Monitor auto-updates this file. -->
+
+## Slack
+last_ts: $CURRENT_TS
+
+## Files
+LASTCHECK
+
 # Member directories + agent definitions
 mkdir -p "$TARGET/.claude/agents"
 echo "Creating .claude/agents/ definitions..."
