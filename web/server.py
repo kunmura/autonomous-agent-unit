@@ -581,10 +581,23 @@ def get_activity_feed(proj: dict) -> list:
                 except Exception:
                     pass
 
-    events.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    def _ts_float(e):
+        ts = e.get("ts", 0)
+        if isinstance(ts, str):
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                return 0
+        return float(ts) if ts else 0
+
+    events.sort(key=_ts_float, reverse=True)
     for e in events[:50]:
         try:
-            dt = datetime.fromtimestamp(e["ts"], tz=JST)
+            ts = _ts_float(e)
+            if ts > 1e9:  # epoch seconds
+                dt = datetime.fromtimestamp(ts, tz=JST)
+            else:
+                dt = datetime.now(JST)
             e["time"] = dt.strftime("%H:%M:%S")
             e["date"] = dt.strftime("%m/%d")
         except Exception:
