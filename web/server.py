@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AAU Web Server — Setup Wizard + Monitoring Dashboard."""
+"""AAU Web Server — Multi-project Monitoring Dashboard + Setup Wizard."""
 
 import http.server
 import json
@@ -19,27 +19,25 @@ WEB_DIR = AAU_ROOT / "web"
 CLAUDE_DIR = pathlib.Path.home() / ".claude"
 STATE_FILE = WEB_DIR / ".last_project"
 
-# ─── Managed project state ───────────────────────────────────
-_project = {"path": None, "name": None, "prefix": None, "members": [], "launchd_jobs": []}
-_project_lock = threading.Lock()
+# ─── Multi-project state ─────────────────────────────────────
+_projects = {}  # key -> project_data
+_projects_lock = threading.Lock()
+_active_project = None  # key of "primary" project for settings
 
 
-def load_project(project_path: str):
-    """Load project config from aau.yaml."""
-    p = pathlib.Path(project_path)
-    yaml_file = p / "aau.yaml"
+def _parse_project(project_path: pathlib.Path) -> dict | None:
+    """Parse a single project's aau.yaml and return project data."""
+    yaml_file = project_path / "aau.yaml"
     if not yaml_file.exists():
-        return
+        return None
     text = yaml_file.read_text()
 
-    # Parse project name (under "project:" section)
     proj_name = None
     proj_prefix = None
     in_project = False
     in_runtime = False
     for line in text.splitlines():
         stripped = line.strip()
-        # Track top-level sections
         if line and not line[0].isspace() and stripped.endswith(":"):
             in_project = stripped == "project:"
             in_runtime = stripped == "runtime:"
@@ -49,7 +47,6 @@ def load_project(project_path: str):
         if in_runtime and stripped.startswith("prefix:"):
             proj_prefix = stripped.split(":", 1)[1].strip().strip('"')
 
-    # Parse members
     members = []
     in_members = False
     for line in text.splitlines():
@@ -62,57 +59,72 @@ def load_project(project_path: str):
                 members.append({"name": stripped.split(":", 1)[1].strip()})
             elif stripped.startswith("role:") and members:
                 members[-1]["role"] = stripped.split(":", 1)[1].strip().strip('"')
-            elif stripped and not stripped.startswith("-") and not stripped.startswith(("role:", "timeout:", "max_turns:", "interval:", "tools:")):
+            elif stripped and not stripped.startswith("-") and not stripped.startswith(
+                ("role:", "timeout:", "max_turns:", "interval:", "tools:")
+            ):
                 in_members = False
 
-    with _project_lock:
-        _project["path"] = str(p)
-        _project["name"] = proj_name
-        _project["prefix"] = proj_prefix
-        _project["members"] = members
-        # Build launchd job labels
-        name = proj_name or "unknown"
-        jobs = [
-            f"ai.{name}.task-monitor",
-            f"ai.{name}.health-monitor",
-            f"ai.{name}.director-autonomous",
-            f"ai.{name}.director-responder",
-        ]
-        for m in members:
-            jobs.append(f"ai.{name}.agent-{m['name']}")
-        _project["launchd_jobs"] = jobs
+    name = proj_name or project_path.name
+    jobs = [
+        f"ai.{name}.task-monitor",
+        f"ai.{name}.health-monitor",
+        f"ai.{name}.director-autonomous",
+        f"ai.{name}.director-responder",
+    ]
+    for m in members:
+        jobs.append(f"ai.{name}.agent-{m['name']}")
 
-    # Persist for next server start
-    try:
-        STATE_FILE.write_text(str(p))
-    except Exception:
-        pass
-
-    print(f"  Loaded project: {proj_name} ({p})")
-    print(f"  Members: {[m['name'] for m in members]}")
-    print(f"  Jobs: {jobs}")
+    return {
+        "path": str(project_path),
+        "name": name,
+        "prefix": proj_prefix or "",
+        "members": members,
+        "launchd_jobs": jobs,
+    }
 
 
-def _auto_detect_project():
-    """Auto-detect project on startup."""
-    # 1. Check saved state
+def load_project(project_path: str) -> str | None:
+    """Load a single project, return its key."""
+    p = pathlib.Path(project_path)
+    data = _parse_project(p)
+    if not data:
+        return None
+    key = data["name"]
+    with _projects_lock:
+        _projects[key] = data
+    print(f"  Loaded: {key} ({p}) — {[m['name'] for m in data['members']]}")
+    return key
+
+
+def scan_all_projects():
+    """Scan ~/git/ for all directories containing aau.yaml."""
+    git_root = pathlib.Path.home() / "git"
+    if not git_root.exists():
+        return
+    for candidate in sorted(git_root.iterdir()):
+        if candidate.is_dir() and (candidate / "aau.yaml").exists():
+            load_project(str(candidate))
+
+
+def _auto_detect_project() -> str | None:
+    """Auto-detect a single project on startup (legacy compat)."""
     if STATE_FILE.exists():
         saved = STATE_FILE.read_text().strip()
         if saved and pathlib.Path(saved).joinpath("aau.yaml").exists():
             return saved
-
-    # 2. Scan ~/git/ for aau.yaml
     git_root = pathlib.Path.home() / "git"
     if git_root.exists():
-        candidates = sorted(git_root.glob("*/aau.yaml"), key=lambda f: f.stat().st_mtime, reverse=True)
+        candidates = sorted(
+            git_root.glob("*/aau.yaml"), key=lambda f: f.stat().st_mtime, reverse=True
+        )
         if candidates:
             return str(candidates[0].parent)
-
     return None
 
 
 # ─── System Metrics (psutil optional) ────────────────────────
 _prev_net = None
+
 
 def get_system_metrics():
     global _prev_net
@@ -210,24 +222,30 @@ def _compute_token_stats():
     today_start = _today_start_utc()
     cutoff = today_start.timestamp()
     by_model = {}
-    by_model_project = {}
-    session_ids = set()
-    session_ids_project = set()
 
-    # Determine project-specific directory filter
-    with _project_lock:
-        project_path = _project.get("path", "")
-    project_dir_name = ""
-    if project_path:
-        # ~/.claude/projects/ uses path with / replaced by -
-        project_dir_name = project_path.lstrip("/").replace("/", "-")
+    # Build project dir mappings
+    with _projects_lock:
+        project_dirs = {}
+        for key, proj in _projects.items():
+            pp = proj.get("path", "")
+            if pp:
+                project_dirs[key] = pp.lstrip("/").replace("/", "-")
+
+    by_model_per_project = {k: {} for k in project_dirs}
+    session_ids = set()
+    session_ids_per_project = {k: set() for k in project_dirs}
 
     files = g.glob(str(CLAUDE_DIR / "projects" / "**" / "*.jsonl"), recursive=True)
     for f in files:
         try:
             if os.path.getmtime(f) < cutoff:
                 continue
-            is_project_file = project_dir_name and project_dir_name in f
+            # Determine which project this file belongs to
+            file_projects = []
+            for key, dir_name in project_dirs.items():
+                if dir_name and dir_name in f:
+                    file_projects.append(key)
+
             with open(f, errors="ignore") as fp:
                 for line in fp:
                     try:
@@ -248,7 +266,7 @@ def _compute_token_stats():
                         cr = usage.get("cache_read_input_tokens", 0)
                         cw = usage.get("cache_creation_input_tokens", 0)
 
-                        # All projects total
+                        # Global total
                         if model not in by_model:
                             by_model[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "calls": 0}
                         m = by_model[model]
@@ -260,18 +278,19 @@ def _compute_token_stats():
                         if sid:
                             session_ids.add(sid)
 
-                        # Project-specific total
-                        if is_project_file:
-                            if model not in by_model_project:
-                                by_model_project[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "calls": 0}
-                            mp = by_model_project[model]
+                        # Per-project
+                        for pk in file_projects:
+                            pmodel = by_model_per_project[pk]
+                            if model not in pmodel:
+                                pmodel[model] = {"input": 0, "output": 0, "cache_read": 0, "cache_creation": 0, "calls": 0}
+                            mp = pmodel[model]
                             mp["input"] += inp
                             mp["output"] += out
                             mp["cache_read"] += cr
                             mp["cache_creation"] += cw
                             mp["calls"] += 1
                             if sid:
-                                session_ids_project.add(sid)
+                                session_ids_per_project[pk].add(sid)
                     except Exception:
                         pass
         except Exception:
@@ -293,9 +312,11 @@ def _compute_token_stats():
         totals["by_model"] = models_list
         return totals
 
-    result = {"today": _build_totals(by_model, session_ids)}
-    if project_dir_name:
-        result["project"] = _build_totals(by_model_project, session_ids_project)
+    result = {"today": _build_totals(by_model, session_ids), "per_project": {}}
+    for pk in project_dirs:
+        result["per_project"][pk] = _build_totals(
+            by_model_per_project[pk], session_ids_per_project[pk]
+        )
     return result
 
 
@@ -335,12 +356,11 @@ def get_claude_processes():
     return procs
 
 
-# ─── Launchd Jobs ────────────────────────────────────────────
-def get_launchd_jobs():
-    with _project_lock:
-        job_labels = list(_project["launchd_jobs"])
-        prefix = _project.get("prefix", "")
-        name = _project.get("name", "")
+# ─── Per-project data functions ──────────────────────────────
+def get_launchd_jobs(proj: dict) -> list:
+    job_labels = list(proj.get("launchd_jobs", []))
+    prefix = proj.get("prefix", "")
+    name = proj.get("name", "")
 
     if not job_labels:
         return []
@@ -366,7 +386,6 @@ def get_launchd_jobs():
         is_running = pid != "-"
         short = label.replace(f"ai.{name}.", "") if name else label
 
-        # Read last log line
         log_line = ""
         log_path = f"/tmp/{prefix}_{short.replace('-', '_')}.log" if prefix else ""
         try:
@@ -385,12 +404,9 @@ def get_launchd_jobs():
     return jobs
 
 
-# ─── Task File Status ────────────────────────────────────────
-def get_task_status():
-    with _project_lock:
-        project_path = _project.get("path")
-        members = list(_project.get("members", []))
-
+def get_task_status(proj: dict) -> list:
+    project_path = proj.get("path")
+    members = list(proj.get("members", []))
     if not project_path:
         return []
 
@@ -401,7 +417,7 @@ def get_task_status():
         tasks_file = pathlib.Path(project_path) / "team" / name / "tasks.md"
         progress_file = pathlib.Path(project_path) / "team" / name / "progress.md"
 
-        pending = in_progress = done = needs_evidence = 0
+        pending = in_progress = done = needs_evidence = blocked = 0
         try:
             if tasks_file.exists():
                 content = tasks_file.read_text()
@@ -409,6 +425,8 @@ def get_task_status():
                     upper = line.upper()
                     if "[NEEDS_EVIDENCE]" in upper:
                         needs_evidence += 1
+                    elif "[BLOCKED]" in upper:
+                        blocked += 1
                     elif "[PENDING]" in upper:
                         pending += 1
                     elif "[IN_PROGRESS]" in upper:
@@ -418,7 +436,6 @@ def get_task_status():
         except Exception:
             pass
 
-        # Last progress update
         last_progress = ""
         try:
             if progress_file.exists():
@@ -436,10 +453,163 @@ def get_task_status():
         result.append({
             "name": name, "role": role,
             "pending": pending, "in_progress": in_progress, "done": done,
-            "needs_evidence": needs_evidence,
+            "needs_evidence": needs_evidence, "blocked": blocked,
             "last_progress": last_progress,
         })
     return result
+
+
+def get_inbox_entries(proj: dict) -> list:
+    project_path = proj.get("path")
+    if not project_path:
+        return []
+
+    inbox_file = pathlib.Path(project_path) / "team" / "director" / "inbox.md"
+    if not inbox_file.exists():
+        return []
+
+    try:
+        text = inbox_file.read_text()
+    except Exception:
+        return []
+
+    entries = []
+    current = None
+    for line in text.splitlines():
+        if line.startswith("## ["):
+            if current:
+                entries.append(current)
+            header = line[3:].strip()
+            current = {"header": header, "lines": [], "status": ""}
+        elif current is not None:
+            if line.startswith("ステータス:") or line.startswith("Status:"):
+                current["status"] = line.split(":", 1)[1].strip()
+            else:
+                current["lines"].append(line)
+    if current:
+        entries.append(current)
+
+    entries.reverse()
+    return entries[:10]
+
+
+def get_activity_feed(proj: dict) -> list:
+    project_path = proj.get("path")
+    members = [m["name"] for m in proj.get("members", [])]
+    prefix = proj.get("prefix", "")
+
+    if not project_path:
+        return []
+
+    events = []
+    team_dir = pathlib.Path(project_path) / "team"
+
+    # Task completion from output files
+    for member in members:
+        output_dir = team_dir / member / "output"
+        if not output_dir.exists():
+            continue
+        try:
+            for f in output_dir.iterdir():
+                if f.is_file() and not f.name.startswith("."):
+                    mtime = f.stat().st_mtime
+                    events.append({"ts": mtime, "type": "done", "text": f"{member}: {f.name}"})
+        except Exception:
+            pass
+
+    # Inbox events
+    inbox_file = team_dir / "director" / "inbox.md"
+    if inbox_file.exists():
+        try:
+            text = inbox_file.read_text()
+            for line in text.splitlines():
+                if line.startswith("## ["):
+                    header = line[4:].strip()
+                    bracket_end = header.find("]")
+                    if bracket_end > 0:
+                        ts_str = header[:bracket_end]
+                        desc = header[bracket_end + 1:].strip()
+                        try:
+                            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M")
+                            dt = dt.replace(tzinfo=JST)
+                            events.append({"ts": dt.timestamp(), "type": "slack", "text": desc[:80]})
+                        except ValueError:
+                            pass
+        except Exception:
+            pass
+
+    # Agent JSONL logs
+    if prefix:
+        import glob as g
+        for log_file in g.glob(f"/tmp/{prefix}_agent_*.jsonl"):
+            try:
+                member_name = pathlib.Path(log_file).stem.replace(f"{prefix}_agent_", "")
+                with open(log_file, errors="ignore") as fp:
+                    lines = fp.readlines()[-20:]
+                for line in lines:
+                    try:
+                        d = json.loads(line)
+                        evt = d.get("event") or d.get("msg", "")
+                        ts = d.get("ts", 0)
+                        if evt == "claude_launch":
+                            events.append({"ts": ts, "type": "active", "text": f"{member_name}: Claude起動"})
+                        elif evt in ("session_succeeded", "session_complete"):
+                            events.append({"ts": ts, "type": "done", "text": f"{member_name}: セッション完了"})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        for log_type in ["director_autonomous", "director_responder"]:
+            log_file = f"/tmp/{prefix}_{log_type}.jsonl"
+            if os.path.exists(log_file):
+                try:
+                    with open(log_file, errors="ignore") as fp:
+                        lines = fp.readlines()[-20:]
+                    for line in lines:
+                        try:
+                            d = json.loads(line)
+                            evt = d.get("event") or d.get("msg", "")
+                            ts = d.get("ts", 0)
+                            if evt == "claude_launch":
+                                events.append({"ts": ts, "type": "active", "text": "director: Claude起動"})
+                            elif evt in ("session_succeeded", "session_complete"):
+                                action = d.get("action", "")
+                                events.append({"ts": ts, "type": "done", "text": f"director: {action} 完了"})
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+    events.sort(key=lambda e: e.get("ts", 0), reverse=True)
+    for e in events[:50]:
+        try:
+            dt = datetime.fromtimestamp(e["ts"], tz=JST)
+            e["time"] = dt.strftime("%H:%M:%S")
+            e["date"] = dt.strftime("%m/%d")
+        except Exception:
+            e["time"] = "–"
+            e["date"] = "–"
+    return events[:50]
+
+
+# ─── Promised status ─────────────────────────────────────────
+def get_promised_status(proj: dict) -> dict:
+    project_path = proj.get("path")
+    if not project_path:
+        return {"pending": 0, "in_queue": 0, "done": 0}
+    promised = pathlib.Path(project_path) / "team" / "director" / "promised.md"
+    if not promised.exists():
+        return {"pending": 0, "in_queue": 0, "done": 0}
+    try:
+        text = promised.read_text()
+        return {
+            "pending": text.count("[PENDING]"),
+            "in_queue": text.count("[IN_QUEUE]"),
+            "done": text.count("[DONE]"),
+        }
+    except Exception:
+        return {"pending": 0, "in_queue": 0, "done": 0}
 
 
 # ─── Ollama ──────────────────────────────────────────────────
@@ -463,204 +633,72 @@ def get_ollama_status():
         return {"running": False, "all_models": [], "loaded": []}
 
 
-# ─── Inbox (Slack messages) ──────────────────────────────────
-def get_inbox_entries():
-    """Read recent inbox entries for display."""
-    with _project_lock:
-        project_path = _project.get("path")
-    if not project_path:
-        return []
-
-    inbox_file = pathlib.Path(project_path) / "team" / "director" / "inbox.md"
-    if not inbox_file.exists():
-        return []
-
+# ─── Health summary per project ──────────────────────────────
+def get_health_summary(proj: dict) -> str:
+    """Return quick health: 'healthy', 'warning', 'critical', or 'unknown'."""
+    prefix = proj.get("prefix", "")
+    if not prefix:
+        return "unknown"
+    state_file = pathlib.Path(f"/tmp/{prefix}_health_state.json")
+    if not state_file.exists():
+        return "unknown"
     try:
-        text = inbox_file.read_text()
+        state = json.loads(state_file.read_text())
+        for key, val in state.items():
+            if "_notified" in key:
+                if "critical" in str(val).lower() or "rule" in str(val).lower():
+                    return "critical"
+                if "warn" in str(val).lower():
+                    return "warning"
+        return "healthy"
     except Exception:
-        return []
-
-    entries = []
-    current = None
-    for line in text.splitlines():
-        if line.startswith("## ["):
-            if current:
-                entries.append(current)
-            # Parse header: ## [2024-01-01 12:00] Slack: Producer ...
-            header = line[3:].strip()
-            current = {"header": header, "lines": [], "status": ""}
-        elif current is not None:
-            if line.startswith("ステータス:") or line.startswith("Status:"):
-                current["status"] = line.split(":", 1)[1].strip()
-            else:
-                current["lines"].append(line)
-    if current:
-        entries.append(current)
-
-    # Return last 10, newest first
-    entries.reverse()
-    return entries[:10]
+        return "unknown"
 
 
-# ─── Activity Feed ────────────────────────────────────────────
-def get_activity_feed():
-    """Collect recent activity events from output files, inbox, and agent logs."""
-    with _project_lock:
-        project_path = _project.get("path")
-        members = [m["name"] for m in _project.get("members", [])]
-        prefix = _project.get("prefix", "")
-
-    if not project_path:
-        return []
-
-    events = []
-    team_dir = pathlib.Path(project_path) / "team"
-
-    # 1. Task completion events from team/{member}/output/ file mtimes
-    for member in members:
-        output_dir = team_dir / member / "output"
-        if not output_dir.exists():
-            continue
-        try:
-            for f in output_dir.iterdir():
-                if f.is_file() and not f.name.startswith("."):
-                    mtime = f.stat().st_mtime
-                    events.append({
-                        "ts": mtime,
-                        "type": "done",
-                        "text": f"{member}: {f.name}",
-                    })
-        except Exception:
-            pass
-
-    # 2. Slack message events from team/director/inbox.md
-    inbox_file = team_dir / "director" / "inbox.md"
-    if inbox_file.exists():
-        try:
-            text = inbox_file.read_text()
-            for line in text.splitlines():
-                if line.startswith("## ["):
-                    # Parse: ## [2024-01-01 12:00] Slack: ...
-                    header = line[4:].strip()
-                    bracket_end = header.find("]")
-                    if bracket_end > 0:
-                        ts_str = header[:bracket_end]
-                        desc = header[bracket_end+1:].strip()
-                        try:
-                            dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M")
-                            dt = dt.replace(tzinfo=JST)
-                            events.append({
-                                "ts": dt.timestamp(),
-                                "type": "slack",
-                                "text": desc[:80],
-                            })
-                        except ValueError:
-                            pass
-        except Exception:
-            pass
-
-    # 3. Claude launch events from agent JSONL logs
-    if prefix:
-        import glob as g
-        log_pattern = f"/tmp/{prefix}_agent_*.jsonl"
-        for log_file in g.glob(log_pattern):
-            try:
-                member_name = pathlib.Path(log_file).stem.replace(f"{prefix}_agent_", "")
-                # Read last 20 lines for recent events
-                with open(log_file, errors="ignore") as fp:
-                    lines = fp.readlines()[-20:]
-                for line in lines:
-                    try:
-                        d = json.loads(line)
-                        if d.get("event") == "claude_launch":
-                            ts = d.get("ts", 0)
-                            events.append({
-                                "ts": ts,
-                                "type": "active",
-                                "text": f"{member_name}: Claude起動",
-                            })
-                        elif d.get("event") == "session_succeeded":
-                            ts = d.get("ts", 0)
-                            events.append({
-                                "ts": ts,
-                                "type": "done",
-                                "text": f"{member_name}: セッション完了",
-                            })
-                        elif d.get("event") == "task_created":
-                            ts = d.get("ts", 0)
-                            events.append({
-                                "ts": ts,
-                                "type": "created",
-                                "text": f"{member_name}: タスク作成",
-                            })
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        # Also check director logs
-        for log_type in ["director_autonomous", "director_responder"]:
-            log_file = f"/tmp/{prefix}_{log_type}.jsonl"
-            if os.path.exists(log_file):
-                try:
-                    with open(log_file, errors="ignore") as fp:
-                        lines = fp.readlines()[-20:]
-                    for line in lines:
-                        try:
-                            d = json.loads(line)
-                            event = d.get("event", "")
-                            ts = d.get("ts", 0)
-                            if event == "claude_launch":
-                                events.append({"ts": ts, "type": "active", "text": "director: Claude起動"})
-                            elif event == "session_succeeded":
-                                action = d.get("action", "")
-                                events.append({"ts": ts, "type": "done", "text": f"director: {action} 完了"})
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-    # Sort by timestamp descending, return last 50
-    events.sort(key=lambda e: e.get("ts", 0), reverse=True)
-    # Format timestamps for display
-    for e in events[:50]:
-        try:
-            dt = datetime.fromtimestamp(e["ts"], tz=JST)
-            e["time"] = dt.strftime("%H:%M:%S")
-            e["date"] = dt.strftime("%m/%d")
-        except Exception:
-            e["time"] = "–"
-            e["date"] = "–"
-    return events[:50]
-
-
-# ─── AI Status (combined SSE) ────────────────────────────────
+# ─── AI Status (combined SSE — multi-project) ────────────────
 def get_ai_status():
     tokens = get_token_stats()
     claude_procs = get_claude_processes()
-    launchd = get_launchd_jobs()
-    tasks = get_task_status()
     ollama = get_ollama_status()
-    inbox = get_inbox_entries()
-    activity = get_activity_feed()
 
-    with _project_lock:
-        project_info = {
-            "name": _project.get("name", ""),
-            "path": _project.get("path", ""),
-            "members": list(_project.get("members", [])),
+    with _projects_lock:
+        projects_snapshot = dict(_projects)
+
+    projects_data = {}
+    for key, proj in projects_snapshot.items():
+        tasks = get_task_status(proj)
+        # Summary counts
+        total_pending = sum(t["pending"] for t in tasks)
+        total_active = sum(t["in_progress"] for t in tasks)
+        total_done = sum(t["done"] for t in tasks)
+        total_blocked = sum(t.get("blocked", 0) for t in tasks)
+
+        projects_data[key] = {
+            "name": proj["name"],
+            "path": proj["path"],
+            "prefix": proj.get("prefix", ""),
+            "members": proj["members"],
+            "tasks": tasks,
+            "launchd": get_launchd_jobs(proj),
+            "inbox": get_inbox_entries(proj),
+            "activity": get_activity_feed(proj),
+            "promised": get_promised_status(proj),
+            "health": get_health_summary(proj),
+            "summary": {
+                "pending": total_pending,
+                "active": total_active,
+                "done": total_done,
+                "blocked": total_blocked,
+                "members": len(proj["members"]),
+            },
         }
 
     return {
         "ts": datetime.now().strftime("%H:%M:%S"),
-        "project": project_info,
+        "projects": projects_data,
         "tokens": tokens,
         "claude_procs": claude_procs,
-        "launchd": launchd,
-        "tasks": tasks,
         "ollama": ollama,
-        "inbox": inbox,
-        "activity": activity,
     }
 
 
@@ -671,8 +709,8 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/":
-            with _project_lock:
-                has_project = _project.get("path") is not None
+            with _projects_lock:
+                has_project = len(_projects) > 0
             self._serve_file("monitor.html" if has_project else "index.html")
         elif self.path == "/setup":
             self._serve_file("index.html")
@@ -684,7 +722,9 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
             self._serve_sse(get_system_metrics, interval=2)
         elif self.path == "/ai":
             self._serve_sse(get_ai_status, interval=5)
-        elif self.path == "/api/config":
+        elif self.path == "/api/projects":
+            self._handle_list_projects()
+        elif self.path.startswith("/api/config"):
             self._handle_get_config()
         else:
             super().do_GET()
@@ -698,6 +738,8 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_team_update()
         elif self.path == "/api/config":
             self._handle_save_config()
+        elif self.path == "/api/rescan":
+            self._handle_rescan()
         else:
             self.send_error(404)
 
@@ -733,13 +775,37 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
         platform = "macOS" if sys.platform == "darwin" else "Linux"
         self._json_response({"claude_cli": claude_path, "platform": platform})
 
+    def _handle_list_projects(self):
+        with _projects_lock:
+            projects = {k: {"name": v["name"], "path": v["path"], "members": len(v["members"])}
+                        for k, v in _projects.items()}
+        self._json_response({"ok": True, "projects": projects})
+
+    def _handle_rescan(self):
+        scan_all_projects()
+        with _projects_lock:
+            count = len(_projects)
+        self._json_response({"ok": True, "count": count})
+
     def _handle_get_config(self):
-        """Return current aau.yaml + .env as JSON for the settings page."""
-        with _project_lock:
-            project_path = _project.get("path")
-        if not project_path:
-            self._json_response({"ok": False, "error": "No project loaded"}, status=404)
-            return
+        # Parse query param: ?project=key
+        project_key = None
+        if "?" in self.path:
+            from urllib.parse import parse_qs, urlparse
+            qs = parse_qs(urlparse(self.path).query)
+            project_key = qs.get("project", [None])[0]
+
+        with _projects_lock:
+            if project_key and project_key in _projects:
+                project_path = _projects[project_key]["path"]
+            elif _projects:
+                # Default to first project
+                first_key = next(iter(_projects))
+                project_path = _projects[first_key]["path"]
+            else:
+                self._json_response({"ok": False, "error": "No project loaded"}, status=404)
+                return
+
         try:
             result = read_project_config(project_path)
             self._json_response({"ok": True, **result})
@@ -747,11 +813,14 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
             self._json_response({"ok": False, "error": str(e)}, status=500)
 
     def _handle_save_config(self):
-        """Save updated config to aau.yaml + .env, reload, and update services."""
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length))
         try:
             result = save_project_config(body)
+            # Reload the project
+            pp = body.get("project_path", "")
+            if pp:
+                load_project(pp)
             self._json_response({"ok": True, **result})
         except Exception as e:
             self._json_response({"ok": False, "error": str(e)}, status=500)
@@ -760,7 +829,16 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length))
         try:
-            result = update_team(body.get("members", []))
+            project_key = body.get("project")
+            with _projects_lock:
+                if project_key and project_key in _projects:
+                    proj = _projects[project_key]
+                elif _projects:
+                    proj = next(iter(_projects.values()))
+                else:
+                    raise ValueError("No project loaded")
+            result = update_team(body.get("members", []), proj["path"])
+            load_project(proj["path"])
             self._json_response({"ok": True, **result})
         except Exception as e:
             self._json_response({"ok": False, "error": str(e)}, status=500)
@@ -770,8 +848,12 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
         body = json.loads(self.rfile.read(length))
         try:
             result = run_setup(body)
-            # Load project for monitoring
             load_project(result["project_path"])
+            # Save as last project
+            try:
+                STATE_FILE.write_text(result["project_path"])
+            except Exception:
+                pass
             self._json_response({"ok": True, **result})
         except Exception as e:
             self._json_response({"ok": False, "error": str(e)}, status=500)
@@ -804,12 +886,15 @@ ROLE_DEFAULT_TOOLS = {
     "backend": "Read,Write,Edit,Bash,Grep,Glob",
     "designer": "Read,Write,Edit,Bash",
     "planner": "Read,Write,Edit",
+    "artist": "Read,Write,Edit,Bash",
+    "assistant": "Read,Write,Edit,Bash",
+    "docs": "Read,Write,Edit,Bash",
+    "research": "Read,Write,Edit,Bash,WebSearch,WebFetch",
 }
 DEFAULT_TOOLS = "Read,Write,Edit,Bash"
 
 
 def _default_tools_for(name, role=""):
-    """Return default tool set based on member name or role."""
     name_lower = name.lower()
     if name_lower in ROLE_DEFAULT_TOOLS:
         return ROLE_DEFAULT_TOOLS[name_lower]
@@ -821,7 +906,6 @@ def _default_tools_for(name, role=""):
 
 
 def _build_member_yaml(members):
-    """Build YAML block for team members with default tools."""
     lines = []
     for m in members:
         name = m.get("name", "").strip()
@@ -839,34 +923,24 @@ def _build_member_yaml(members):
 
 
 # ─── Team Update Logic ────────────────────────────────────────
-def update_team(members: list) -> dict:
-    """Update team members in aau.yaml, re-scaffold, and update services."""
+def update_team(members: list, project_path: str = None) -> dict:
     import re
 
-    with _project_lock:
-        project_path = _project.get("path")
-        project_name = _project.get("name")
-
     if not project_path:
-        raise ValueError("No project loaded")
+        raise ValueError("No project path")
 
     target = pathlib.Path(project_path)
     yaml_file = target / "aau.yaml"
     if not yaml_file.exists():
         raise ValueError(f"aau.yaml not found in {target}")
 
-    # Build new members YAML block
     new_members_block = _build_member_yaml(members)
-
-    # Replace members section in aau.yaml
     text = yaml_file.read_text()
-    # Match from "  members:" to the next top-level or second-level key
     pattern = r"(  members:\n)((?:    .*\n)*)"
     replacement = f"  members:\n{new_members_block}\n"
     new_text = re.sub(pattern, replacement, text, count=1)
     yaml_file.write_text(new_text)
 
-    # Create team directories for new members
     for m in members:
         name = m.get("name", "").strip()
         if not name:
@@ -876,14 +950,11 @@ def update_team(members: list) -> dict:
             member_dir.mkdir(parents=True, exist_ok=True)
             (member_dir / "tasks.md").write_text(
                 f"# {name} — Task Queue\n\n"
-                f"<!-- Status: PENDING | IN_PROGRESS | DONE | CANCELLED -->\n\n"
+                f"<!-- Status: PENDING | IN_PROGRESS | DONE | BLOCKED | CANCELLED -->\n\n"
                 f"## Active Tasks\n\n"
             )
-            (member_dir / "progress.md").write_text(
-                f"# {name} — Progress Log\n\n"
-            )
+            (member_dir / "progress.md").write_text(f"# {name} — Progress Log\n\n")
 
-    # Update launchd services
     install_output = ""
     if sys.platform == "darwin":
         gen = AAU_ROOT / "platform" / "launchd" / "generate_plists.sh"
@@ -892,19 +963,12 @@ def update_team(members: list) -> dict:
         r2 = subprocess.run(["bash", str(inst)], capture_output=True, text=True, cwd=str(target))
         install_output = r1.stdout + r1.stderr + r2.stdout + r2.stderr
 
-    # Reload project config
-    load_project(str(target))
-
     valid_members = [m["name"].strip() for m in members if m.get("name", "").strip()]
-    return {
-        "members": valid_members,
-        "install_output": install_output,
-    }
+    return {"members": valid_members, "install_output": install_output}
 
 
 # ─── Config Read/Write ────────────────────────────────────────
 def read_project_config(project_path: str) -> dict:
-    """Read aau.yaml + .env into a flat dict for the settings UI."""
     root = pathlib.Path(project_path)
     yaml_file = root / "aau.yaml"
     env_file = root / ".env"
@@ -914,7 +978,6 @@ def read_project_config(project_path: str) -> dict:
 
     text = yaml_file.read_text()
 
-    # Parse key fields from YAML (simple parser)
     def get_val(section, key):
         in_section = False
         for line in text.splitlines():
@@ -926,7 +989,6 @@ def read_project_config(project_path: str) -> dict:
                 return stripped.split(":", 1)[1].strip().strip('"')
         return ""
 
-    # Parse members
     members = []
     in_members = False
     current = None
@@ -941,10 +1003,11 @@ def read_project_config(project_path: str) -> dict:
                 members.append(current)
             elif stripped.startswith("role:") and current:
                 current["role"] = stripped.split(":", 1)[1].strip().strip('"')
-            elif stripped and not stripped.startswith("-") and not stripped.startswith(("role:", "timeout:", "max_turns:", "interval:", "tools:")):
+            elif stripped and not stripped.startswith("-") and not stripped.startswith(
+                ("role:", "timeout:", "max_turns:", "interval:", "tools:")
+            ):
                 in_members = False
 
-    # Parse .env
     env = {}
     if env_file.exists():
         for line in env_file.read_text().splitlines():
@@ -966,7 +1029,6 @@ def read_project_config(project_path: str) -> dict:
         "slack_producer_id": get_val("slack", "producer_id"),
         "slack_bot_id": get_val("slack", "bot_id"),
         "members": members,
-        # From .env (secrets)
         "slack_token": env.get("SLACK_TOKEN", ""),
         "slack_app_token": env.get("SLACK_APP_TOKEN", ""),
         "slack_channel": env.get("SLACK_CHANNEL", ""),
@@ -975,16 +1037,12 @@ def read_project_config(project_path: str) -> dict:
 
 
 def save_project_config(cfg: dict) -> dict:
-    """Save config updates to aau.yaml + .env, reload project, update services."""
-    with _project_lock:
-        project_path = _project.get("path")
+    project_path = cfg.get("project_path")
     if not project_path:
-        raise ValueError("No project loaded")
+        raise ValueError("No project_path in config")
 
     target = pathlib.Path(project_path)
     notify_plugin = cfg.get("notify_plugin", "none")
-
-    # Build members YAML
     members = cfg.get("members", [])
     member_yaml = _build_member_yaml(members)
 
@@ -1049,15 +1107,20 @@ prompts:
 health:
   critical_patterns:
     - "Reached max turns"
+    - "max turns exceeded"
     - "permission denied"
     - "Edit not allowed"
     - "Tool not allowed"
+    - "Write not allowed"
   warning_patterns:
     - "TESTS FAILED"
     - "assert failed"
     - "Error: "
     - "BLOCKED"
+    - "Traceback (most recent"
   stale_threshold: 1500
+  relaunch_window_min: 60
+  relaunch_critical_count: 5
 
 slack:
   producer_id: "{cfg.get("slack_producer_id", "")}"
@@ -1065,7 +1128,6 @@ slack:
 """
     (target / "aau.yaml").write_text(yaml_content)
 
-    # Write .env
     env_lines = []
     if cfg.get("slack_token"):
         env_lines.append(f'SLACK_TOKEN={cfg["slack_token"]}')
@@ -1082,7 +1144,6 @@ slack:
     if env_lines:
         (target / ".env").write_text("\n".join(env_lines) + "\n")
 
-    # Create team dirs for new members
     for m in members:
         name = m.get("name", "").strip()
         if not name:
@@ -1093,7 +1154,6 @@ slack:
             (member_dir / "tasks.md").write_text(f"# {name} — Task Queue\n\n## Active Tasks\n\n")
             (member_dir / "progress.md").write_text(f"# {name} — Progress Log\n\n")
 
-    # Update services
     install_output = ""
     if sys.platform == "darwin":
         gen = AAU_ROOT / "platform" / "launchd" / "generate_plists.sh"
@@ -1102,7 +1162,6 @@ slack:
         r2 = subprocess.run(["bash", str(inst)], capture_output=True, text=True, cwd=str(target))
         install_output = r1.stdout + r1.stderr + r2.stdout + r2.stderr
 
-    load_project(str(target))
     return {"install_output": install_output}
 
 
@@ -1113,107 +1172,15 @@ def run_setup(cfg: dict) -> dict:
         target.mkdir(parents=True, exist_ok=True)
 
     project_name = cfg["project_name"]
-    claude_cli = cfg.get("claude_cli", "/opt/homebrew/bin/claude")
-    claude_model = cfg.get("claude_model", "claude-sonnet-4-6")
     prefix = cfg.get("prefix", project_name[:10].lower().replace(" ", "_").replace("-", "_"))
-    language = cfg.get("language", "ja")
-    llm_enabled = cfg.get("llm_enabled", False)
-    quiet_start = cfg.get("quiet_start", 0)
-    quiet_end = cfg.get("quiet_end", 8)
+
+    # Write config
+    save_cfg = {**cfg, "prefix": prefix, "project_path": str(target)}
+    save_project_config(save_cfg)
+
+    # Write .gitignore
     notify_plugin = cfg.get("notify_plugin", "none")
-
-    members = cfg.get("members", [{"name": "coder", "role": "Implementation"}])
-    member_yaml = _build_member_yaml(members)
-
-    yaml_content = f"""\
-project:
-  name: "{project_name}"
-
-runtime:
-  claude_cli: "{claude_cli}"
-  claude_model: "{claude_model}"
-  permission_mode: "bypassPermissions"
-  tmp_dir: "/tmp"
-  prefix: "{prefix}"
-
-team:
-  members:
-{member_yaml}
-
-director:
-  autonomous_interval: 1800
-  responder_interval: 120
-  timeout: 600
-  max_turns:
-    report: 15
-    followup: 20
-    stale: 10
-    idle: 25
-    respond: 40
-  report_interval: 7200
-  stale_threshold: 1800
-  daily_max_invocations: 20
-  quiet_hours_start: {quiet_start}
-  quiet_hours_end: {quiet_end}
-
-scheduling:
-  task_monitor_interval: 300
-  health_monitor_interval: 600
-
-locks:
-  max_age: 1800
-
-retry:
-  max_retries: 3
-  backoff_base: 300
-
-notification:
-  plugin: "{notify_plugin}"
-  report_style: "short"
-  report_max_chars: 50
-
-local_llm:
-  enabled: {"true" if llm_enabled else "false"}
-  url: "http://localhost:11434/api/generate"
-  classifier_model: "gemma2:9b"
-  drafter_model: "qwen2.5-coder:32b"
-  classifier_timeout: 30
-  drafter_timeout: 300
-
-prompts:
-  language: "{language}"
-
-health:
-  critical_patterns:
-    - "Reached max turns"
-    - "permission denied"
-    - "Edit not allowed"
-    - "Tool not allowed"
-  warning_patterns:
-    - "TESTS FAILED"
-    - "assert failed"
-    - "Error: "
-    - "BLOCKED"
-  stale_threshold: 1500
-
-slack:
-  producer_id: "{cfg.get("slack_producer_id", "")}"
-  bot_id: "{cfg.get("slack_bot_id", "")}"
-"""
-    (target / "aau.yaml").write_text(yaml_content)
-
-    env_lines = []
-    if notify_plugin == "slack":
-        env_lines.append(f'SLACK_TOKEN={cfg.get("slack_token", "")}')
-        env_lines.append(f'SLACK_CHANNEL={cfg.get("slack_channel", "")}')
-        if cfg.get("slack_producer_id"):
-            env_lines.append(f'SLACK_PRODUCER_ID={cfg.get("slack_producer_id", "")}')
-        if cfg.get("slack_bot_id"):
-            env_lines.append(f'SLACK_BOT_ID={cfg.get("slack_bot_id", "")}')
-    elif notify_plugin == "webhook":
-        env_lines.append(f'WEBHOOK_URL={cfg.get("webhook_url", "")}')
-    if env_lines:
-        (target / ".env").write_text("\n".join(env_lines) + "\n")
+    if notify_plugin != "none":
         gitignore = target / ".gitignore"
         if gitignore.exists():
             text = gitignore.read_text()
@@ -1222,6 +1189,7 @@ slack:
         else:
             gitignore.write_text(".env\n")
 
+    # Scaffold
     scaffold = AAU_ROOT / "init" / "scaffold.sh"
     result = subprocess.run(
         ["bash", str(scaffold), str(target)],
@@ -1229,6 +1197,7 @@ slack:
     )
     scaffold_output = result.stdout + result.stderr
 
+    # Install services
     install_output = ""
     if cfg.get("install_services", False):
         if sys.platform == "darwin":
@@ -1241,10 +1210,11 @@ slack:
         r2 = subprocess.run(["bash", str(inst)], capture_output=True, text=True, cwd=str(target))
         install_output = r1.stdout + r1.stderr + r2.stdout + r2.stderr
 
+    members = cfg.get("members", [{"name": "coder", "role": "Implementation"}])
     return {
         "project_path": str(target),
         "config_file": str(target / "aau.yaml"),
-        "members": [m["name"] for m in members],
+        "members": [m["name"] for m in members if m.get("name")],
         "scaffold_output": scaffold_output,
         "install_output": install_output,
     }
@@ -1257,12 +1227,21 @@ class ThreadedServer(http.server.ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
-    # Load project: CLI arg > saved state > auto-detect
-    project_path = sys.argv[1] if len(sys.argv) > 1 else _auto_detect_project()
-    if project_path:
-        load_project(project_path)
+    # Load projects: CLI arg > scan all
+    if len(sys.argv) > 1:
+        load_project(sys.argv[1])
     else:
-        print("  No project found. Set up via web UI first.")
+        # Scan all projects in ~/git/
+        print("Scanning for AAU projects...")
+        scan_all_projects()
+
+    with _projects_lock:
+        project_count = len(_projects)
+
+    if project_count == 0:
+        print("  No projects found. Set up via web UI first.")
+    else:
+        print(f"  {project_count} project(s) loaded.")
 
     # Pre-compute token stats in background
     threading.Thread(target=get_token_stats, daemon=True).start()
@@ -1270,11 +1249,9 @@ if __name__ == "__main__":
     with ThreadedServer(("", PORT), AAUHandler) as httpd:
         url = f"http://localhost:{PORT}"
         print(f"AAU Server: {url}")
-        if project_path:
-            print(f"  Monitor: {url}/")
-            print(f"  Setup:   {url}/setup")
-        else:
-            print(f"  Setup:   {url}/")
+        print(f"  Dashboard: {url}/")
+        print(f"  Setup:     {url}/setup")
+        print(f"  Settings:  {url}/settings")
         webbrowser.open(url)
         try:
             httpd.serve_forever()

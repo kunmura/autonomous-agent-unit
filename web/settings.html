@@ -231,7 +231,18 @@ header a:hover { color: var(--blue); }
   <div id="loading" style="text-align:center;padding:40px;color:var(--muted)">Loading...</div>
   <div id="content" style="display:none">
 
-    <!-- Project -->
+    <!-- Project Selector -->
+    <div class="section" style="padding:12px 20px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:0.3px">Project</label>
+        <select id="projectSelector" onchange="switchProject(this.value)" style="
+          flex:1;padding:8px 12px;background:var(--bg);border:1px solid var(--border);
+          border-radius:6px;color:var(--text);font-family:inherit;font-size:13px;outline:none;
+        "></select>
+      </div>
+    </div>
+
+    <!-- Project Details -->
     <div class="section">
       <div class="section-title">Project</div>
       <div class="row">
@@ -404,8 +415,38 @@ function setPlugin(p) {
   $('webhookFields').classList.toggle('vis', p==='webhook');
 }
 
-function loadConfig() {
-  fetch('/api/config')
+let _currentProjectKey = '';
+
+function loadProjectList() {
+  return fetch('/api/projects')
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) return;
+      const sel = $('projectSelector');
+      sel.innerHTML = '';
+      const projects = d.projects || {};
+      Object.keys(projects).forEach(key => {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = `${projects[key].name} (${projects[key].members} members)`;
+        sel.appendChild(opt);
+      });
+      // Select first if none selected
+      if (!_currentProjectKey && sel.options.length > 0) {
+        _currentProjectKey = sel.options[0].value;
+      }
+      sel.value = _currentProjectKey;
+    });
+}
+
+function switchProject(key) {
+  _currentProjectKey = key;
+  loadConfig(key);
+}
+
+function loadConfig(projectKey) {
+  const qs = projectKey ? `?project=${encodeURIComponent(projectKey)}` : '';
+  fetch('/api/config' + qs)
     .then(r => r.json())
     .then(d => {
       if (!d.ok) { $('loading').textContent = 'Error: ' + d.error; return; }
@@ -491,7 +532,7 @@ async function saveConfig() {
   btn.textContent = 'Save';
 }
 
-loadConfig();
+loadProjectList().then(() => loadConfig(_currentProjectKey));
 </script>
 </body>
 </html>
