@@ -339,9 +339,22 @@ def main() -> None:
             pass
         return events
 
+    # ─── Quiet hours check ────────────────────────────────────────────────
+    quiet_start = int(cfg.get("director", {}).get("quiet_hours_start", 0))
+    quiet_end = int(cfg.get("director", {}).get("quiet_hours_end", 8))
+    current_hour = datetime.now().hour
+    if quiet_start <= current_hour < quiet_end:
+        # Still log but don't create alerts during quiet hours
+        pass  # health_monitor runs but doesn't write to inbox
+
+    in_quiet_hours = quiet_start <= current_hour < quiet_end
+
     # ─── Run checks ──────────────────────────────────────────────────────
     log("=== health_monitor start ===")
     jlog("info", "start")
+    if in_quiet_hours:
+        log("  quiet hours — monitoring only, no alerts")
+        jlog("info", "quiet_hours", hour=current_hour)
     state = load_state()
     alerts = []
 
@@ -376,7 +389,12 @@ def main() -> None:
         if result["problem"]:
             norm_reason = "stale" if result["reason"].startswith("stale") else result["reason"]
             notified_key = f"{member}_notified"
-            if state.get(notified_key) != norm_reason:
+            if in_quiet_hours:
+                # During quiet hours: log but don't write to inbox or trigger director
+                log(f"  {member}: {result['severity']} — {result['summary']} (quiet hours, suppressed)")
+                jlog("info", "problem_suppressed_quiet", member=member, severity=result["severity"])
+                state[notified_key] = norm_reason
+            elif state.get(notified_key) != norm_reason:
                 summary = result["summary"]
                 severity = result["severity"]
                 log(f"  {member}: {severity} — {summary}")

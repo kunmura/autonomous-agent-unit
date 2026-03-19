@@ -627,6 +627,35 @@ def scan_bot_promises(state: dict):
 
 
 # ── メイン ────────────────────────────────────────────────────────────
+def _is_quiet_hours(cfg: dict) -> bool:
+    """Check if current time is within quiet hours."""
+    root = cfg.get("project_root")
+    if not root:
+        return False
+    yaml_file = root / "aau.yaml"
+    if not yaml_file.exists():
+        return False
+    try:
+        text = yaml_file.read_text()
+        quiet_start = 0
+        quiet_end = 8
+        in_director = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if line and not line[0].isspace() and stripped.endswith(":"):
+                in_director = stripped == "director:"
+                continue
+            if in_director:
+                if stripped.startswith("quiet_hours_start:"):
+                    quiet_start = int(stripped.split(":", 1)[1].strip())
+                if stripped.startswith("quiet_hours_end:"):
+                    quiet_end = int(stripped.split(":", 1)[1].strip())
+        hour = datetime.now().hour
+        return quiet_start <= hour < quiet_end
+    except Exception:
+        return False
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} /path/to/project")
@@ -642,15 +671,37 @@ def main():
     init(cfg)
     log("=== slack_monitor start ===")
 
+    # Quiet hours: still track messages (update last_ts) but don't write inbox or reply
+    quiet = _is_quiet_hours(cfg)
+    if quiet:
+        log("quiet hours — tracking only, no inbox writes or replies")
+
     state = read_state()
 
-    new_ts = check_slack(state)
-    state["slack_ts"] = new_ts
+    if quiet:
+        # During quiet hours: only update last_ts to avoid re-ingesting messages later
+        last_ts = state.get("slack_ts", "0")
+        producer_id = cfg.get("producer_id", "")
+        if producer_id:
+            try:
+                data = slack_get("conversations.history", {
+                    "channel": cfg["slack_channel"], "limit": 100, "oldest": last_ts,
+                })
+                msgs = data.get("messages", [])
+                if msgs:
+                    newest = max(float(m.get("ts", 0)) for m in msgs)
+                    state["slack_ts"] = str(newest)
+                    log(f"  quiet: skipped {len(msgs)} messages, updated ts to {newest}")
+            except Exception as e:
+                log(f"  quiet: Slack API error: {e}")
+    else:
+        new_ts = check_slack(state)
+        state["slack_ts"] = new_ts
 
-    scan_bot_promises(state)
+        scan_bot_promises(state)
 
-    file_updates = check_team_files(state)
-    state.update(file_updates)
+        file_updates = check_team_files(state)
+        state.update(file_updates)
 
     write_state(state)
     log("=== done ===")
