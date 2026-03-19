@@ -158,6 +158,8 @@ def main() -> None:
         "TESTS FAILED", "assert failed", "Error: "
     ])
     stale_threshold = int(health_cfg.get("stale_threshold", 1500))
+    relaunch_window_min = int(health_cfg.get("relaunch_window_min", 60))
+    relaunch_critical_count = int(health_cfg.get("relaunch_critical_count", 5))
 
     log_file = tmp_dir / f"{prefix}_health_monitor.log"
     jsonl_file = tmp_dir / f"{prefix}_health_monitor.jsonl"
@@ -209,12 +211,78 @@ def main() -> None:
         except Exception:
             return ""
 
-    def rule_check(log_tail: str, inprogress: list, log_path: Path) -> dict:
+    def count_recent_launches(log_path: Path, window_min: int = 60) -> tuple[int, int]:
+        """Count launches and completions within the recent window."""
+        if not log_path.exists():
+            return 0, 0
+        cutoff = datetime.now() - timedelta(minutes=window_min)
+        launches, completes = 0, 0
+        try:
+            for line in log_path.read_text().splitlines():
+                m = re.match(r"\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]", line)
+                if not m:
+                    continue
+                try:
+                    ts = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                if ts < cutoff:
+                    continue
+                if "claude_launch" in line or "trigger consumed" in line or "launching Claude" in line:
+                    launches += 1
+                elif "session_succeeded" in line or "agent run complete" in line:
+                    completes += 1
+        except Exception:
+            pass
+        return launches, completes
+
+    def scan_outfiles_for_errors(member: str) -> str:
+        """Scan /tmp/{prefix}_agent_{member}_*.out for critical errors."""
+        import glob as glob_mod
+        pattern = f"{tmp_dir}/{prefix}_agent_{member}_*.out"
+        now = time.time()
+        found_error = ""
+        for path_str in glob_mod.glob(pattern):
+            p = Path(path_str)
+            try:
+                age = now - p.stat().st_mtime
+                content = p.read_text(errors="replace")
+                for cp in critical_patterns:
+                    if cp.lower() in content.lower():
+                        if not found_error:
+                            found_error = f"{cp} (outfile: {p.name})"
+                        break
+                if age > 3600:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return found_error
+
+    def rule_check(log_tail: str, inprogress: list, log_path: Path, member: str = "") -> dict:
         log_lower = log_tail.lower()
+
+        # Check outfiles for errors (catches errors not in main log)
+        if member:
+            out_error = scan_outfiles_for_errors(member)
+            if out_error:
+                return {"problem": True, "severity": "critical",
+                        "summary": f"Session error: {out_error[:60]}", "reason": f"outfile: {out_error[:40]}"}
+
+        # Relaunch loop detection
+        if log_path.exists():
+            launches, completes = count_recent_launches(log_path, relaunch_window_min)
+            if launches >= relaunch_critical_count and completes == 0:
+                return {"problem": True, "severity": "critical",
+                        "summary": f"Relaunch loop: {launches} launches, 0 completions in {relaunch_window_min}min",
+                        "reason": f"relaunch_loop: {launches}launches/{completes}completes"}
+
+        # Critical pattern matching
         for p in critical_patterns:
             if p.lower() in log_lower:
                 return {"problem": True, "severity": "critical",
                         "summary": f"Agent stopped: {p[:40]}", "reason": f"rule: {p}"}
+
+        # Stale log detection
         if inprogress and log_path.exists():
             age = time.time() - log_path.stat().st_mtime
             if age > stale_threshold:
@@ -222,6 +290,8 @@ def main() -> None:
                 return {"problem": True, "severity": "critical",
                         "summary": f"IN_PROGRESS but no log update for {mins}min",
                         "reason": f"stale: {mins}min"}
+
+        # Warning patterns
         for p in warning_patterns:
             if p.lower() in log_lower:
                 return {"problem": True, "severity": "warning",
@@ -302,7 +372,7 @@ def main() -> None:
                 alerts.append(f"{member}: IN_PROGRESS but no log")
             continue
 
-        result = rule_check(log_tail, inprogress, log_path)
+        result = rule_check(log_tail, inprogress, log_path, member)
         if result["problem"]:
             norm_reason = "stale" if result["reason"].startswith("stale") else result["reason"]
             notified_key = f"{member}_notified"

@@ -39,12 +39,38 @@ MAX_TURNS="${MAX_TURNS:-30}"
 TOOLS=$(aau_member_attr "$MEMBER" "tools")
 TOOLS="${TOOLS:-Read,Write,Edit,Bash}"
 
+# Check for draft.md (local LLM pre-draft)
+DRAFT_FILE="$AAU_PROJECT_ROOT/team/${MEMBER}/draft.md"
+DRAFT_HINT=""
+if [[ -f "$DRAFT_FILE" ]]; then
+    DRAFT_SIZE=$(wc -c < "$DRAFT_FILE" 2>/dev/null || echo 0)
+    if [[ "$DRAFT_SIZE" -gt 10 ]]; then
+        DRAFT_HINT="
+
+IMPORTANT: team/${MEMBER}/draft.md にローカルLLMの下書きがあります。まずこれを確認し、品質が十分ならそのまま使用してください。使用・不使用に関わらず、処理後に draft.md を削除してください。"
+        aau_log "draft.md found (${DRAFT_SIZE} bytes)"
+        aau_jlog "info" "draft_found" "\"member\":\"$MEMBER\",\"size\":$DRAFT_SIZE"
+    fi
+fi
+
+# Check for blocked tasks in trigger content
+BLOCKED_HINT=""
+if echo "$TRIGGER_CONTENT" | grep -q "blocked="; then
+    BLOCKED_COUNT=$(echo "$TRIGGER_CONTENT" | grep -oE 'blocked=[0-9]+' | cut -d= -f2)
+    if [[ "$BLOCKED_COUNT" -gt 0 ]]; then
+        BLOCKED_HINT="
+
+NOTE: ${BLOCKED_COUNT} task(s) are [BLOCKED]. Check prerequisites before working on them. If the blocking task is not yet [DONE], skip the blocked task."
+    fi
+fi
+
 # Render prompt
 PROMPT=$(aau_render_prompt "agent_poll_tasks.txt" "member=$MEMBER")
 if [[ -z "$PROMPT" ]]; then
     # Fallback prompt if template not found
     PROMPT="team/${MEMBER}/tasks.md を読み、PENDINGタスクを処理せよ。完了したらステータスをDONEに更新し、progress.mdに結果を記録せよ。"
 fi
+PROMPT="${PROMPT}${DRAFT_HINT}${BLOCKED_HINT}"
 
 aau_log "launching Claude (timeout=${TIMEOUT}s, max_turns=$MAX_TURNS)"
 aau_jlog "info" "claude_launch" "\"member\":\"$MEMBER\",\"timeout\":$TIMEOUT,\"max_turns\":$MAX_TURNS"
@@ -98,6 +124,12 @@ elif [[ "$EXIT_CODE" -ne 0 ]]; then
 else
     aau_log "session succeeded"
     aau_jlog "info" "session_succeeded" "\"member\":\"$MEMBER\""
+
+    # ─── Clean up draft.md if it was used ──────────────────────
+    if [[ -f "$DRAFT_FILE" ]]; then
+        rm -f "$DRAFT_FILE"
+        aau_log "draft.md cleaned up after session"
+    fi
 
     # ─── Evidence Validation Gate ──────────────────────────────
     # After successful session, validate that DONE tasks have proper evidence.

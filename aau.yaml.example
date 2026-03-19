@@ -80,6 +80,8 @@ slack:
   # Required for Slack two-way communication (producer <-> director)
   producer_id: ""    # Slack user ID of the producer (e.g. UK25H386P)
   bot_id: ""         # Slack bot user ID (e.g. U0AK6BHNV6H)
+  # Keyword to trigger recording (e.g. "録画", "record"). Set to "" to disable.
+  record_keyword: ""
 
 local_llm:
   enabled: false
@@ -96,13 +98,21 @@ prompts:
 health:
   critical_patterns:
     - "Reached max turns"
+    - "max turns exceeded"
+    - "agent timed out after"
     - "permission denied"
     - "Edit not allowed"
-    - "Tool not allowed"
     - "Write not allowed"
+    - "Tool not allowed"
+    - "allowedTools does not include"
+    - "requires permission"
   warning_patterns:
     - "TESTS FAILED"
     - "assert failed"
     - "Error: "
     - "BLOCKED"
+    - "Traceback (most recent"
   stale_threshold: 1500
+  # Relaunch loop detection: alert when agent launches N+ times with 0 completions
+  relaunch_window_min: 60
+  relaunch_critical_count: 5

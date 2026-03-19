@@ -109,6 +109,7 @@ aau_run_with_timeout() {
 
 aau_notify() {
     local message="$1"
+    local agent_name="${2:-}"  # Optional: agent name for [by Agent] prefix
     local plugin="${AAU_NOTIFICATION_PLUGIN:-none}"
 
     case "$plugin" in
@@ -116,25 +117,27 @@ aau_notify() {
             local plugin_script="$AAU_ROOT/plugins/slack/notify.sh"
             if [[ -f "$plugin_script" ]]; then
                 source "$plugin_script"
-                aau_plugin_notify "$message"
+                aau_plugin_notify "$message" "$agent_name"
             fi
             ;;
         discord)
             local plugin_script="$AAU_ROOT/plugins/discord/notify.sh"
             if [[ -f "$plugin_script" ]]; then
                 source "$plugin_script"
-                aau_plugin_notify "$message"
+                aau_plugin_notify "$message" "$agent_name"
             fi
             ;;
         webhook)
             local plugin_script="$AAU_ROOT/plugins/webhook/notify.sh"
             if [[ -f "$plugin_script" ]]; then
                 source "$plugin_script"
-                aau_plugin_notify "$message"
+                aau_plugin_notify "$message" "$agent_name"
             fi
             ;;
         none)
-            aau_log "notification (no plugin): $message"
+            local prefix=""
+            [[ -n "$agent_name" ]] && prefix="[by ${agent_name}] "
+            aau_log "notification (no plugin): ${prefix}$message"
             ;;
     esac
 }

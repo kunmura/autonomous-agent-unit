@@ -82,6 +82,8 @@ def load_config(project_path: str) -> dict:
                     cfg["producer_id"] = stripped.split(":", 1)[1].strip().strip('"')
                 if stripped.startswith("bot_id:"):
                     cfg["bot_id"] = stripped.split(":", 1)[1].strip().strip('"')
+                if stripped.startswith("record_keyword:"):
+                    cfg["record_keyword"] = stripped.split(":", 1)[1].strip().strip('"')
 
     # Load .env
     env_file = root / ".env"
@@ -103,6 +105,12 @@ def load_config(project_path: str) -> dict:
 
 
 # ── インテント定義 ────────────────────────────────────────────────────
+# Intent types
+INTENT_STATUS   = "status"    # System status query → auto-reply without Claude
+INTENT_REACTION = "reaction"  # Short reaction/emoji → skip
+INTENT_RECORD   = "record"    # Recording request → trigger file (configurable)
+INTENT_TASK     = "task"      # Instruction/request/question → requires Claude
+
 STATUS_QUERY_PHRASES = [
     "システム状態", "システムの状態", "状態教えて", "状況教えて", "状況",
     "どうなってる", "進捗教えて", "進捗", "ステータス", "今どうなってる",
@@ -115,16 +123,24 @@ REACTION_PHRASES = [
     "なるほど", "わかった", "わかりました", "承知", "おｋ",
 ]
 
+APPROVAL_PHRASES = [
+    "okです", "ok です", "いいです", "承認", "進めて", "問題ない",
+]
+
 PROMISE_PHRASES = [
     "のちほど作成", "のちほど報告", "後で作成", "後ほど作成", "後ほど報告",
-    "お送りします", "送ります", "報告します", "作成します", "作ります",
-    "着手します", "動かします", "起動します", "完成次第",
+    "あとで作成", "お送りします", "送ります", "報告します", "報告いたします",
+    "作成します", "作ります", "即着手", "着手します",
+    "動かします", "起動します", "完成次第", "できたらお送り",
 ]
 
 PROMISE_EXCLUDE = [
     "ディレクターが後ほど対応します",
     "確認します。ディレクターが",
 ]
+
+# Record trigger keyword (set in aau.yaml via slack.record_keyword, default: "録画")
+RECORD_KEYWORD = "録画"
 
 
 # ── ユーティリティ ────────────────────────────────────────────────────
@@ -178,14 +194,32 @@ def slack_post(text: str):
 # ── インテント判定 ────────────────────────────────────────────────────
 def detect_intent(text: str) -> str:
     text_lower = text.lower().strip()
+
+    # Approval phrases → always TASK (never classify as REACTION)
+    if any(p in text_lower for p in APPROVAL_PHRASES):
+        return INTENT_TASK
+    # Bare "OK"/"ok" → also TASK (likely approval)
+    if text_lower.strip() in ("ok", "ｏｋ", "okay"):
+        return INTENT_TASK
+
+    # Short reactions (≤10 chars and contains reaction keyword)
     if len(text) <= 10 and any(p in text_lower for p in REACTION_PHRASES):
-        return "reaction"
+        return INTENT_REACTION
+    # Emoji-only messages (no ASCII content)
     ascii_chars = sum(1 for c in text if ord(c) < 128 and c.strip())
     if len(text) <= 5 and ascii_chars == 0:
-        return "reaction"
+        return INTENT_REACTION
+
+    # Status query
     if any(p in text for p in STATUS_QUERY_PHRASES):
-        return "status"
-    return "task"
+        return INTENT_STATUS
+
+    # Record trigger (configurable keyword)
+    record_kw = _cfg.get("record_keyword", RECORD_KEYWORD) if _cfg else RECORD_KEYWORD
+    if record_kw and record_kw in text:
+        return INTENT_RECORD
+
+    return INTENT_TASK
 
 
 # ── Ollama分類 ────────────────────────────────────────────────────────
@@ -299,8 +333,54 @@ def gather_system_status() -> str:
 
 
 def format_status_report(raw: str) -> str:
-    dt = datetime.now().strftime("%H:%M")
-    return f"*System Status* ({dt})\n{raw}\n— _by Bot (auto)_"
+    """Format system status into a structured Slack message."""
+    lines = raw.splitlines()
+
+    services_line = next((l for l in lines if "launchd" in l.lower()), "")
+    queue_line = next((l for l in lines if "Queue" in l or "キュー" in l), "")
+
+    # Build member sections
+    member_blocks = {}
+    current_member = None
+    for line in lines:
+        for m in _cfg.get("members", []):
+            if line.startswith(f"{m}:"):
+                current_member = m
+                member_blocks[m] = [line.split(":", 1)[1].strip()]
+                break
+        else:
+            if current_member and line.startswith("  "):
+                member_blocks[current_member].append(line.strip())
+
+    report_parts = [
+        f"*System Status* ({datetime.now().strftime('%H:%M')})",
+    ]
+    if services_line:
+        report_parts.append(f"🖥️ {services_line}")
+    if queue_line:
+        report_parts.append(f"📥 {queue_line}")
+
+    for m in _cfg.get("members", []):
+        parts = member_blocks.get(m, [])
+        if not parts:
+            continue
+        summary = parts[0]
+        if "all done" in summary or "全完了" in summary:
+            report_parts.append(f"✅ *{m}*: {summary}")
+        elif "BLOCKED" in summary:
+            report_parts.append(f"⚠️ *{m}*: {summary}")
+        else:
+            header = f"🔄 *{m}*: {summary}"
+            details = "\n".join(f"　　{p}" for p in parts[1:])
+            report_parts.append(f"{header}\n{details}" if details else header)
+
+    # Director inbox
+    director_parts = member_blocks.get("director", [])
+    if director_parts:
+        report_parts.append(f"📋 *director*: {director_parts[0]}")
+
+    report_parts.append(f"— _by Bot (auto)_")
+    return "\n".join(filter(None, report_parts)).strip()
 
 
 # ── State管理 ────────────────────────────────────────────────────────
@@ -394,13 +474,31 @@ def check_slack(state: dict) -> str:
         jlog("info", "message_received", intent=intent, text_len=len(text))
 
         # REACTION → skip
-        if intent == "reaction":
+        if intent == INTENT_REACTION:
             log("  → reaction, skipped")
+            jlog("info", "reaction_skipped")
             new_latest_ts = ts
             continue
 
-        # STATUS → auto-reply with system status
-        if intent == "status":
+        # RECORD → create trigger file (no Claude)
+        if intent == INTENT_RECORD:
+            record_kw = _cfg.get("record_keyword", RECORD_KEYWORD) if _cfg else RECORD_KEYWORD
+            duration_match = re.search(rf'{re.escape(record_kw)}\s*(\d+)', text)
+            duration = int(duration_match.group(1)) if duration_match else 60
+            prefix = _cfg.get("prefix", "aau")
+            trigger_path = Path(f"/tmp/{prefix}_trigger_record")
+            trigger_path.write_text(str(duration))
+            try:
+                slack_post(f"📹 Record request accepted ({duration}s).\n— _by Bot (auto)_")
+                log(f"  → record trigger created (duration={duration}s)")
+                jlog("info", "record_trigger_created", duration=duration)
+            except Exception as e:
+                log(f"  → record reply error: {e}")
+            new_latest_ts = ts
+            continue
+
+        # STATUS → auto-reply with system status (no Claude)
+        if intent == INTENT_STATUS:
             log("  → status query, auto-reply")
             jlog("info", "status_query_auto")
             raw = gather_system_status()
@@ -418,9 +516,9 @@ def check_slack(state: dict) -> str:
         summary = classification.get("summary", text[:50])
         auto_reply = classification.get("auto_reply", "確認します。ディレクターが後ほど対応します。")
 
-        # Auto-reply
+        # Auto-reply with agent name tag
         try:
-            slack_post(f"{auto_reply}\n— _by Bot (auto)_")
+            slack_post(f"[by Bot] {auto_reply}")
             log("  → auto reply posted")
         except Exception as e:
             log(f"  → auto reply error: {e}")
