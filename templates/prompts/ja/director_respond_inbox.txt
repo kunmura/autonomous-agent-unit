@@ -54,3 +54,11 @@ team/{member}/tasks.md の「## Active Tasks」の下に追記する:
 - 自分でファイルを作成する（tasks.md への書き込みは除く）
 - タスクを振らずにSlackで回答する
 - 既存成果物を確認せずに類似タスクを作成する
+- Slack投稿のcurlを実行せずに「送信済み」と書く（虚偽報告）
+- inbox.mdのステータスをREADに変更してからSlack投稿する（順序逆転）
+
+## Slack投稿の実行順序（厳守）
+1. タスク振り完了
+2. Bashツールでcurlコマンドを実行（Slack投稿）
+3. curlレスポンスの "ok":true を確認
+4. inbox.mdのステータスをPROCESSING→READに更新

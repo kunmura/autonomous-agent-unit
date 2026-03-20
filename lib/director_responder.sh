@@ -86,13 +86,28 @@ NOTIFY_PLUGIN="${AAU_NOTIFICATION_PLUGIN:-none}"
 if [[ "$NOTIFY_PLUGIN" == "slack" && -n "$SLACK_TOKEN" && -n "$SLACK_CHANNEL" ]]; then
     PROMPT="$PROMPT
 
-## Slack投稿
+## Slack投稿（絶対厳守 — これを怠ると全作業が無意味になる）
+タスク振り完了後、**必ずBashツールで以下のcurlコマンドを実行せよ**。
+「送信済み」と書くだけでは投稿されない。curlを実際に実行しなければプロデューサーに何も届かない。
+
+### 投稿ルール
+1. 必ず最後のステップとしてcurlを実行する
+2. 投稿テキストはプロデューサーの依頼への回答＋どのメンバーに何を振ったかの要約
+3. curlのレスポンスに \"ok\":true が含まれることを確認する
+
+### 実行するコマンド（変数はそのまま使える）
+\`\`\`bash
+curl -s -X POST 'https://slack.com/api/chat.postMessage' \\
+  -H 'Authorization: Bearer $SLACK_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{\"channel\":\"$SLACK_CHANNEL\",\"text\":\"ここに報告内容を書く\"}'
+\`\`\`
+
+環境変数:
 SLACK_TOKEN=\"$SLACK_TOKEN\"
 SLACK_CHANNEL=\"$SLACK_CHANNEL\"
-curl -s -X POST 'https://slack.com/api/chat.postMessage' \\
-  -H \"Authorization: Bearer \$SLACK_TOKEN\" \\
-  -H 'Content-Type: application/json' \\
-  -d '{\"channel\":\"\$SLACK_CHANNEL\",\"text\":\"返信内容\"}'"
+
+**curlを実行しないままinbox.mdをREADにしてはならない。**"
 fi
 
 aau_log "launching Claude (max_turns=$MAX_TURNS)"

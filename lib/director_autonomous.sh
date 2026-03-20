@@ -273,21 +273,29 @@ NOTIFY_PLUGIN="${AAU_NOTIFICATION_PLUGIN:-none}"
 if [[ "$NOTIFY_PLUGIN" == "slack" && -n "$SLACK_TOKEN" && -n "$SLACK_CHANNEL" ]]; then
     PROMPT="$PROMPT
 
-## Slack投稿（必須）
-以下のcurlコマンドでSlackに報告を投稿せよ。投稿しなかった場合、Producerに状況が伝わらない。
+## Slack投稿（絶対厳守 — これを怠ると全作業が無意味になる）
+作業完了後、**必ずBashツールで以下のcurlコマンドを実行せよ**。
+「送信済み」と書くだけでは投稿されない。curlを実際に実行しなければプロデューサーに何も届かない。
 
-投稿内容は以下の構成にすること:
+### 投稿内容の構成
 - 1行目: フェーズ名と進捗率
 - 2行目: 完了タスク数と主要成果物
 - 3行目: 進行中タスクとメンバー
 - 4行目: 次のアクション
 
+### 実行するコマンド（変数はそのまま使える）
+\`\`\`bash
+curl -s -X POST 'https://slack.com/api/chat.postMessage' \\
+  -H 'Authorization: Bearer $SLACK_TOKEN' \\
+  -H 'Content-Type: application/json' \\
+  -d '{\"channel\":\"$SLACK_CHANNEL\",\"text\":\"ここに報告内容を書く\"}'
+\`\`\`
+
+環境変数:
 SLACK_TOKEN=\"$SLACK_TOKEN\"
 SLACK_CHANNEL=\"$SLACK_CHANNEL\"
-curl -s -X POST 'https://slack.com/api/chat.postMessage' \\
-  -H \"Authorization: Bearer \$SLACK_TOKEN\" \\
-  -H 'Content-Type: application/json' \\
-  -d '{\"channel\":\"\$SLACK_CHANNEL\",\"text\":\"報告内容\"}'"
+
+**curlを実行せずにセッションを終了してはならない。投稿しなければプロデューサーには何も見えない。**"
 fi
 
 # ─── Launch Claude ───────────────────────────────────────────────────────
