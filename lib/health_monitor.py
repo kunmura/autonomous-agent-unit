@@ -408,7 +408,7 @@ def main() -> None:
 
                 icon = "🔴" if severity == "critical" else "🟡"
                 dt = datetime.now().strftime("%Y-%m-%d %H:%M")
-                entry = f"\n## [{dt}] {icon} Health: {member} [{severity.upper()}]\n**Issue**: {summary}{heal_note}\nステータス: UNREAD\n\n"
+                entry = f"\n## [{dt}] {icon} Health: {member} [{severity.upper()}]\n**Issue**: {summary}{heal_note}\n**対応**: 内部対応のみ（Slackへの投稿不要）\nステータス: UNREAD\n\n"
                 append_inbox(entry)
                 alerts.append(f"{member}: {summary}")
                 state[notified_key] = norm_reason
