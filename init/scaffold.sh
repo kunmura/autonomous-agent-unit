@@ -95,7 +95,108 @@ PROGRESS
 KNOWLEDGE
 
     # Create INSTRUCTIONS.md for member-specific manual
-    cat > "$TARGET/team/$MEMBER/INSTRUCTIONS.md" << INSTRUCTIONS
+    # Use role-specific template if the member name matches known roles
+    MEMBER_LOWER=$(echo "$MEMBER" | tr '[:upper:]' '[:lower:]')
+
+    if [[ "$MEMBER_LOWER" == "qa" ]]; then
+        cat > "$TARGET/team/$MEMBER/INSTRUCTIONS.md" << 'INSTRUCTIONS'
+# QA — Instructions
+
+## Role
+Quality assurance and testing
+
+## Absolute Rules
+1. **Never use "code review based" testing as a substitute for actual execution**
+2. Every test report MUST include:
+   - The actual command executed (e.g., `npm test`, `npx playwright test`)
+   - The exit code and output
+   - Screenshots if UI-related (save to team/qa/output/)
+3. If a test environment is not available (e.g., no browser), report it as BLOCKED — do not fake a PASS
+4. PASS/FAIL judgment must be based on observed behavior, not code reading
+
+## Task Polling Protocol
+1. Read team/qa/tasks.md every session (never cache)
+2. Find tasks with [PENDING] status
+3. Check prerequisites before starting
+4. Set status to [IN_PROGRESS] and begin work
+5. On completion: set [DONE], update progress.md with test results
+
+## Test Report Template
+```markdown
+# Test Report: TASK-XXX
+
+## Executed Commands
+- `npm test` → exit code 0
+- `npx playwright test` → exit code 1 (2 failures)
+
+## Results
+| Test Case | Result | Notes |
+|-----------|--------|-------|
+| TC-001    | PASS   | ...   |
+
+## Evidence
+- Screenshot: team/qa/output/TASK-XXX_screenshot.png
+- Log: (paste relevant output)
+
+## Judgment
+PASS / FAIL / CONDITIONAL PASS
+```
+INSTRUCTIONS
+
+    elif [[ "$MEMBER_LOWER" == "artist" ]]; then
+        cat > "$TARGET/team/$MEMBER/INSTRUCTIONS.md" << 'INSTRUCTIONS'
+# Artist — Instructions
+
+## Role
+Visual asset creation
+
+## Asset Acquisition (Priority Order)
+1. **Use existing free assets**: Download CC0/MIT-licensed assets via curl
+   - kenney.nl/assets (game assets, CC0)
+   - opengameart.org (sprites, textures, CC0/CC-BY)
+   - itch.io free assets
+2. **Generate via API**: If image generation API is configured (MCP), use it
+3. **Create programmatically**: Use Python (Pillow) or ImageMagick to generate simple assets
+4. **Never submit a "specification document" as a completed art task** — the deliverable must be an actual image file
+
+## Task Polling Protocol
+1. Read team/artist/tasks.md every session (never cache)
+2. Find tasks with [PENDING] status
+3. Check prerequisites before starting
+4. Set status to [IN_PROGRESS] and begin work
+5. On completion: set [DONE], save assets to team/artist/output/ or project assets directory
+
+## Quality Standards
+- All assets must be actual files (png, svg, gif), not descriptions
+- Include asset metadata (size, format, license) in progress.md
+INSTRUCTIONS
+
+    elif [[ "$MEMBER_LOWER" == "coder" ]]; then
+        cat > "$TARGET/team/$MEMBER/INSTRUCTIONS.md" << 'INSTRUCTIONS'
+# Coder — Instructions
+
+## Role
+Implementation and coding
+
+## Absolute Rules
+1. After implementing changes, **verify the build still passes** (`npm run build`, `cargo check`, etc.)
+2. If UI changes are made, take a screenshot for verification (if browser available)
+3. Never mark a task as [DONE] if the build is broken
+
+## Task Polling Protocol
+1. Read team/coder/tasks.md every session (never cache)
+2. Find tasks with [PENDING] status
+3. Check prerequisites before starting
+4. Set status to [IN_PROGRESS] and begin work
+5. On completion: set [DONE], update progress.md
+
+## Quality Standards
+- All deliverables must include evidence of working code
+- Update knowledge.md with lessons learned
+INSTRUCTIONS
+
+    else
+        cat > "$TARGET/team/$MEMBER/INSTRUCTIONS.md" << INSTRUCTIONS
 # ${MEMBER^} — Instructions
 
 ## Role
@@ -119,6 +220,7 @@ ${ROLE:-General team member}
 - All deliverables must include evidence/sources
 - Update knowledge.md with lessons learned
 INSTRUCTIONS
+    fi
 
     # Create .claude/agents/<member>.md
     cat > "$TARGET/.claude/agents/${MEMBER}.md" << AGENTMD

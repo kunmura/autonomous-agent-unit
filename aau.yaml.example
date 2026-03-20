@@ -95,6 +95,12 @@ prompts:
   language: "ja"
   # custom_dir: "prompts/"  # override template prompts
 
+agents:
+  # Max launches per agent per day (prevents runaway cost)
+  daily_max: 50
+  # Max rapid launches in 30min before cooldown activates
+  max_rapid_launches: 4
+
 health:
   critical_patterns:
     - "Reached max turns"

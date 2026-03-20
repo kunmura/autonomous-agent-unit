@@ -57,14 +57,25 @@ while IFS= read -r line; do
 
     # --- Check 3: Evidence section exists ---
     HAS_EVIDENCE=0
-    if grep -qiE '(情報源|信頼性|出典|参考|Sources|References|Evidence)' "$OUTPUT_FILE" 2>/dev/null; then
+    if grep -qiE '(情報源|信頼性|出典|参考|Sources|References|Evidence|実行結果|Test Result|PASS|FAIL|テスト結果)' "$OUTPUT_FILE" 2>/dev/null; then
         HAS_EVIDENCE=1
     fi
 
     if [[ "$HAS_EVIDENCE" -eq 0 ]]; then
-        VALIDATION_ISSUES="${VALIDATION_ISSUES}\n[FAIL] ${TASK_ID}: 「情報源と信頼性」セクションがありません"
+        VALIDATION_ISSUES="${VALIDATION_ISSUES}\n[FAIL] ${TASK_ID}: 「情報源と信頼性」または「実行結果」セクションがありません"
         FAILED=$((FAILED + 1))
         continue
+    fi
+
+    # --- Check 3b: QA reports must have execution evidence (not just code review) ---
+    if [[ "$MEMBER" == "qa" ]]; then
+        HAS_EXECUTION=0
+        if grep -qiE '(実行コマンド|コマンド実行|npm |npx |playwright|スクリーンショット|screenshot|テスト実行|test run|実行結果|exit code|HTTP [0-9])' "$OUTPUT_FILE" 2>/dev/null; then
+            HAS_EXECUTION=1
+        fi
+        if [[ "$HAS_EXECUTION" -eq 0 ]]; then
+            VALIDATION_ISSUES="${VALIDATION_ISSUES}\n[WARN] ${TASK_ID}: QAレポートに実行エビデンスがありません（コードレビューのみ）"
+        fi
     fi
 
     # --- Check 4: Unverified facts are marked ---

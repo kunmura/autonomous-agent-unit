@@ -25,6 +25,39 @@ if [[ "$HOUR" -ge "$QUIET_START" && "$HOUR" -lt "$QUIET_END" ]]; then
     exit 0
 fi
 
+# ─── Daily invocation limit (shared with director) ──────────────────
+TODAY=$(date +%Y-%m-%d)
+DAILY_FILE="${AAU_TMP}/${AAU_PREFIX}_agent_daily_${MEMBER}_${TODAY}"
+DAILY_MAX="${AAU_AGENT_DAILY_MAX:-50}"
+DAILY_COUNT=0
+if [[ -f "$DAILY_FILE" ]]; then
+    DAILY_COUNT=$(cat "$DAILY_FILE" 2>/dev/null || echo 0)
+fi
+if [[ "$DAILY_COUNT" -ge "$DAILY_MAX" ]]; then
+    aau_log "daily limit reached ($DAILY_COUNT/$DAILY_MAX), skip"
+    aau_jlog "warn" "daily_limit" "\"count\":$DAILY_COUNT"
+    exit 0
+fi
+
+# ─── Rapid relaunch cooldown ─────────────────────────────────────────
+# If this agent launched N+ times in the last 30min with no task completion, cooldown
+COOLDOWN_FILE="${AAU_TMP}/${AAU_PREFIX}_agent_${MEMBER}_cooldown"
+COOLDOWN_LAUNCHES="${AAU_TMP}/${AAU_PREFIX}_agent_${MEMBER}_launches"
+MAX_RAPID_LAUNCHES="${AAU_AGENT_MAX_RAPID_LAUNCHES:-4}"
+NOW=$(date +%s)
+
+if [[ -f "$COOLDOWN_FILE" ]]; then
+    COOLDOWN_UNTIL=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
+    if [[ "$NOW" -lt "$COOLDOWN_UNTIL" ]]; then
+        REMAINING=$(( COOLDOWN_UNTIL - NOW ))
+        aau_log "cooldown active (${REMAINING}s remaining), skip"
+        aau_jlog "info" "cooldown_skip" "\"remaining\":$REMAINING"
+        exit 0
+    else
+        rm -f "$COOLDOWN_FILE"
+    fi
+fi
+
 # No trigger → zero-token exit
 if [[ ! -f "$TRIGGER" ]]; then
     aau_log "no trigger, exit"
@@ -35,6 +68,26 @@ fi
 TRIGGER_CONTENT=$(cat "$TRIGGER")
 rm -f "$TRIGGER"
 aau_log "trigger: $TRIGGER_CONTENT"
+
+# Track launch count for cooldown detection
+echo "$NOW" >> "$COOLDOWN_LAUNCHES"
+# Keep only entries from last 30 minutes
+if [[ -f "$COOLDOWN_LAUNCHES" ]]; then
+    CUTOFF=$(( NOW - 1800 ))
+    RECENT_LAUNCHES=0
+    while IFS= read -r ts; do
+        if [[ "$ts" -ge "$CUTOFF" ]]; then
+            RECENT_LAUNCHES=$(( RECENT_LAUNCHES + 1 ))
+        fi
+    done < "$COOLDOWN_LAUNCHES"
+    if [[ "$RECENT_LAUNCHES" -ge "$MAX_RAPID_LAUNCHES" ]]; then
+        aau_log "rapid relaunch detected ($RECENT_LAUNCHES in 30min), entering 30min cooldown"
+        aau_jlog "warn" "cooldown_activated" "\"launches\":$RECENT_LAUNCHES"
+        echo $(( NOW + 1800 )) > "$COOLDOWN_FILE"
+        > "$COOLDOWN_LAUNCHES"
+        exit 0
+    fi
+fi
 
 # Acquire lock
 if ! aau_acquire_lock "$LOCK_NAME"; then
@@ -135,6 +188,15 @@ else
     aau_log "session succeeded"
     aau_jlog "info" "session_succeeded" "\"member\":\"$MEMBER\""
 
+    # Reset rapid launch counter on success (not a loop)
+    > "$COOLDOWN_LAUNCHES" 2>/dev/null
+
+    # Increment daily counter
+    echo $(( DAILY_COUNT + 1 )) > "$DAILY_FILE"
+
+    # Clean old daily counters
+    find "${AAU_TMP}" -name "${AAU_PREFIX}_agent_daily_${MEMBER}_*" -not -name "*${TODAY}" -delete 2>/dev/null
+
     # ─── Clean up draft.md if it was used ──────────────────────
     if [[ -f "$DRAFT_FILE" ]]; then
         rm -f "$DRAFT_FILE"
@@ -152,6 +214,13 @@ else
             aau_log "evidence validation failed — tasks reverted to NEEDS_EVIDENCE"
             aau_jlog "warn" "evidence_gate_failed" "\"member\":\"$MEMBER\""
         fi
+    fi
+
+    # ─── Build Verification Gate ───────────────────────────────
+    # Verify the project still builds after code changes.
+    BUILD_CHECK="$SCRIPT_DIR/build_check.sh"
+    if [[ -f "$BUILD_CHECK" ]]; then
+        bash "$BUILD_CHECK" "$MEMBER"
     fi
 fi
 

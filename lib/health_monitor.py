@@ -301,6 +301,7 @@ def main() -> None:
     def try_self_heal(member: str, reason: str) -> tuple[bool, str]:
         lock_path = tmp_dir / f"{prefix}_agent_{member}.lock"
         trigger_path = tmp_dir / f"{prefix}_trigger_{member}"
+        cooldown_file = tmp_dir / f"{prefix}_agent_{member}_cooldown"
         actions = []
         if lock_path.exists():
             try:
@@ -310,6 +311,16 @@ def main() -> None:
             except (ValueError, ProcessLookupError):
                 lock_path.unlink(missing_ok=True)
                 actions.append("stale_lock_removed")
+
+        # Relaunch loop → STOP the agent, don't restart it
+        if "relaunch_loop" in reason:
+            trigger_path.unlink(missing_ok=True)
+            # Set 30min cooldown so agent_runner won't restart
+            cooldown_file.write_text(str(int(time.time()) + 1800))
+            actions.append("trigger_removed_cooldown_set")
+            jlog("info", "self_heal", member=member, actions=actions)
+            return True, ", ".join(actions)
+
         if "rule" in reason and any(k in reason for k in ["max turns", "permission"]):
             trigger_path.write_text("pending=1 inprogress=0")
             actions.append("trigger_reset")

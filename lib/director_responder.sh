@@ -19,6 +19,20 @@ if [[ "$HOUR" -ge "$QUIET_START" && "$HOUR" -lt "$QUIET_END" ]]; then
     exit 0
 fi
 
+# ─── Daily invocation limit ─────────────────────────────────────────
+TODAY=$(date +%Y-%m-%d)
+DAILY_FILE="${AAU_TMP}/${AAU_PREFIX}_responder_daily_${TODAY}"
+DAILY_MAX="${AAU_DIRECTOR_DAILY_MAX_INVOCATIONS:-20}"
+DAILY_COUNT=0
+if [[ -f "$DAILY_FILE" ]]; then
+    DAILY_COUNT=$(cat "$DAILY_FILE" 2>/dev/null || echo 0)
+fi
+if [[ "$DAILY_COUNT" -ge "$DAILY_MAX" ]]; then
+    aau_log "daily limit reached ($DAILY_COUNT/$DAILY_MAX), skip"
+    aau_jlog "warn" "daily_limit" "\"count\":$DAILY_COUNT"
+    exit 0
+fi
+
 # Lock
 if ! aau_acquire_lock "director_responder"; then
     exit 0
@@ -146,6 +160,8 @@ if echo "$MAIN_OUTPUT" | grep -qE "Reached max turns|^Error:|API error|rate limi
     fi
 else
     rm -f "$RETRY_FILE"
+    echo $(( DAILY_COUNT + 1 )) > "$DAILY_FILE"
+    find "${AAU_TMP}" -name "${AAU_PREFIX}_responder_daily_*" -not -name "*${TODAY}" -delete 2>/dev/null
     aau_log "session succeeded"
     aau_jlog "info" "session_succeeded"
 fi

@@ -11,6 +11,20 @@ aau_jlog "info" "start"
 
 TEAM_DIR="$AAU_PROJECT_ROOT/team"
 
+# ── Approval gate: if status.md has "承認待ち", block ALL triggers ──
+STATUS_FILE="$TEAM_DIR/director/status.md"
+if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+    aau_log "APPROVAL GATE: status.md has approval pending — blocking all triggers"
+    aau_jlog "info" "approval_gate_block"
+    # Clear all existing triggers
+    for _m in $(aau_team_members); do
+        rm -f "${AAU_TMP}/${AAU_PREFIX}_trigger_${_m}"
+    done
+    aau_log "=== done (approval gate) ==="
+    aau_jlog "info" "done" "\"reason\":\"approval_gate\""
+    exit 0
+fi
+
 # ── promised.md PENDING → auto-convert to assistant tasks ──────────
 PROMISED="$TEAM_DIR/director/promised.md"
 # Find the first member to use as promise assignee (prefer "assistant", fallback to first member)
