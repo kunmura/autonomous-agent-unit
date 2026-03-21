@@ -14,6 +14,10 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+# Add lib dir to path for schedule module
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from schedule import is_active as schedule_is_active
+
 # ─── Config loading ──────────────────────────────────────────────────────
 
 def _parse_yaml_simple(text: str) -> dict:
@@ -350,15 +354,8 @@ def main() -> None:
             pass
         return events
 
-    # ─── Quiet hours check ────────────────────────────────────────────────
-    quiet_start = int(cfg.get("director", {}).get("quiet_hours_start", 0))
-    quiet_end = int(cfg.get("director", {}).get("quiet_hours_end", 8))
-    current_hour = datetime.now().hour
-    if quiet_start <= current_hour < quiet_end:
-        # Still log but don't create alerts during quiet hours
-        pass  # health_monitor runs but doesn't write to inbox
-
-    in_quiet_hours = quiet_start <= current_hour < quiet_end
+    # ─── Schedule check ────────────────────────────────────────────────────
+    in_quiet_hours = not schedule_is_active(cfg, "director", str(tmp_dir), prefix)
 
     # ─── Run checks ──────────────────────────────────────────────────────
     log("=== health_monitor start ===")

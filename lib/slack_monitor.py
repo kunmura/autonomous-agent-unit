@@ -13,6 +13,9 @@ import os
 import re
 import subprocess
 import sys
+
+# Add lib dir to path for schedule module
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -110,6 +113,7 @@ INTENT_STATUS   = "status"    # System status query → auto-reply without Claud
 INTENT_REACTION = "reaction"  # Short reaction/emoji → skip
 INTENT_RECORD   = "record"    # Recording request → trigger file (configurable)
 INTENT_TASK     = "task"      # Instruction/request/question → requires Claude
+INTENT_EMERGENCY = "emergency"  # Emergency override → force active hours
 
 STATUS_QUERY_PHRASES = [
     "システム状態", "システムの状態", "状態教えて", "状況教えて", "状況",
@@ -125,6 +129,10 @@ REACTION_PHRASES = [
 
 APPROVAL_PHRASES = [
     "okです", "ok です", "いいです", "承認", "進めて", "問題ない",
+]
+
+EMERGENCY_PHRASES = [
+    "緊急稼働", "緊急対応", "emergency override", "今すぐ動け", "起きろ",
 ]
 
 PROMISE_PHRASES = [
@@ -194,6 +202,10 @@ def slack_post(text: str):
 # ── インテント判定 ────────────────────────────────────────────────────
 def detect_intent(text: str) -> str:
     text_lower = text.lower().strip()
+
+    # Emergency override — highest priority
+    if any(p in text_lower for p in EMERGENCY_PHRASES):
+        return INTENT_EMERGENCY
 
     # Approval phrases → always TASK (never classify as REACTION)
     if any(p in text_lower for p in APPROVAL_PHRASES):
@@ -473,6 +485,22 @@ def check_slack(state: dict) -> str:
         log(f"  → intent: {intent}")
         jlog("info", "message_received", intent=intent, text_len=len(text))
 
+        # EMERGENCY → create override file, force active hours
+        if intent == INTENT_EMERGENCY:
+            duration_match = re.search(r'(\d+)\s*分', text)
+            duration_sec = int(duration_match.group(1)) * 60 if duration_match else 3600
+            em_prefix = _cfg.get("prefix", "aau")
+            override_path = Path(f"/tmp/{em_prefix}_emergency_override")
+            override_path.write_text(str(duration_sec))
+            try:
+                slack_post(f"緊急稼働モード ON ({duration_sec // 60}分間)\nスケジュール制限を一時解除しました。")
+                log(f"  → emergency override created ({duration_sec}s)")
+                jlog("info", "emergency_override", duration=duration_sec)
+            except Exception as e:
+                log(f"  → emergency reply error: {e}")
+            new_latest_ts = ts
+            continue
+
         # REACTION → skip
         if intent == INTENT_REACTION:
             log("  → reaction, skipped")
@@ -628,32 +656,62 @@ def scan_bot_promises(state: dict):
 
 # ── メイン ────────────────────────────────────────────────────────────
 def _is_quiet_hours(cfg: dict) -> bool:
-    """Check if current time is within quiet hours."""
-    root = cfg.get("project_root")
-    if not root:
-        return False
-    yaml_file = root / "aau.yaml"
-    if not yaml_file.exists():
-        return False
+    """Check if current time is within quiet hours using centralized schedule."""
     try:
-        text = yaml_file.read_text()
-        quiet_start = 0
-        quiet_end = 8
-        in_director = False
-        for line in text.splitlines():
-            stripped = line.strip()
-            if line and not line[0].isspace() and stripped.endswith(":"):
-                in_director = stripped == "director:"
-                continue
-            if in_director:
-                if stripped.startswith("quiet_hours_start:"):
-                    quiet_start = int(stripped.split(":", 1)[1].strip())
-                if stripped.startswith("quiet_hours_end:"):
-                    quiet_end = int(stripped.split(":", 1)[1].strip())
-        hour = datetime.now().hour
-        return quiet_start <= hour < quiet_end
+        from schedule import is_active as _sched_active
+        # Build a config dict that schedule.py can understand
+        sched_cfg = {}
+        root = cfg.get("project_root")
+        if root:
+            yaml_file = root / "aau.yaml"
+            if yaml_file.exists():
+                sched_cfg = _parse_yaml_for_schedule(yaml_file)
+        prefix = cfg.get("prefix", "aau")
+        return not _sched_active(sched_cfg, "", "/tmp", prefix)
     except Exception:
         return False
+
+
+def _parse_yaml_for_schedule(yaml_file: Path) -> dict:
+    """Parse aau.yaml to extract schedule and director config for schedule.py."""
+    text = yaml_file.read_text()
+    result = {"director": {}, "schedule": {}}
+    section = ""
+    sub_section = ""
+    breaks = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0 and stripped.endswith(":"):
+            section = stripped[:-1]
+            sub_section = ""
+            continue
+        if section == "schedule":
+            if indent <= 2 and stripped.endswith(":"):
+                sub_section = stripped[:-1]
+                continue
+            if ":" in stripped and not stripped.startswith("-"):
+                k, v = stripped.split(":", 1)
+                k, v = k.strip(), v.strip().strip('"')
+                if sub_section == "weekend":
+                    result["schedule"].setdefault("weekend", {})[k] = v
+                elif sub_section == "overrides":
+                    pass  # handled below
+                elif sub_section:
+                    result["schedule"].setdefault("overrides", {}).setdefault(sub_section, {})[k] = v
+                else:
+                    result["schedule"][k] = v
+            elif stripped.startswith("- "):
+                breaks.append(stripped[2:].strip().strip('"'))
+        elif section == "director":
+            if ":" in stripped:
+                k, v = stripped.split(":", 1)
+                result["director"][k.strip()] = v.strip().strip('"')
+    if breaks:
+        result["schedule"]["breaks"] = breaks
+    return result
 
 
 def main():

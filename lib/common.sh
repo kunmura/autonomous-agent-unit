@@ -10,6 +10,13 @@ if [[ -z "$AAU_CONFIG_FILE" ]]; then
     aau_load_config
 fi
 
+# Load schedule module
+if [[ -f "$AAU_LIB_DIR/schedule.sh" ]]; then
+    source "$AAU_LIB_DIR/schedule.sh"
+elif [[ -n "$AAU_ROOT" && -f "$AAU_ROOT/lib/schedule.sh" ]]; then
+    source "$AAU_ROOT/lib/schedule.sh"
+fi
+
 # ─── Platform detection ──────────────────────────────────────────────────
 AAU_PLATFORM="$(uname -s)"
 

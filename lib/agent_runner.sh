@@ -15,13 +15,10 @@ LOCK_NAME="agent_${MEMBER}"
 aau_log "=== agent_runner start (${MEMBER}) ==="
 aau_jlog "info" "start"
 
-# ─── Quiet hours check ──────────────────────────────────────────────────
-HOUR=$(date +%H)
-QUIET_START="${AAU_DIRECTOR_QUIET_HOURS_START:-0}"
-QUIET_END="${AAU_DIRECTOR_QUIET_HOURS_END:-8}"
-if [[ "$HOUR" -ge "$QUIET_START" && "$HOUR" -lt "$QUIET_END" ]]; then
-    aau_log "quiet hours (hour=$HOUR), skip"
-    aau_jlog "info" "quiet_skip" "\"hour\":$HOUR"
+# ─── Schedule check ──────────────────────────────────────────────────────
+if ! aau_is_active "agents"; then
+    aau_log "outside active hours ($(aau_schedule_status agents)), skip"
+    aau_jlog "info" "schedule_skip"
     exit 0
 fi
 
