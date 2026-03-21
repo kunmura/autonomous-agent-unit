@@ -69,6 +69,22 @@ TRIGGER_CONTENT=$(cat "$TRIGGER")
 rm -f "$TRIGGER"
 aau_log "trigger: $TRIGGER_CONTENT"
 
+# ─── Actionable task gate (zero-token) ────────────────────────────────
+# Even with a trigger, verify tasks.md has PENDING or NEEDS_EVIDENCE tasks.
+# IN_PROGRESS-only triggers cause IDLE sessions that waste tokens.
+TASKS_FILE="$AAU_PROJECT_ROOT/team/${MEMBER}/tasks.md"
+if [[ -f "$TASKS_FILE" ]]; then
+    _PENDING=$(grep -cE '\[PENDING\]|\*\*Status\*\*:\s*PENDING' "$TASKS_FILE" 2>/dev/null || true)
+    _NEEDS_EV=$(grep -c '\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
+    # Exclude self-study tasks (same logic as task_monitor)
+    _REAL_PENDING=$(grep -E '\[PENDING\]|\*\*Status\*\*:\s*PENDING' "$TASKS_FILE" 2>/dev/null | grep -v "自主学習" | wc -l | tr -d ' ')
+    if [[ "${_REAL_PENDING:-0}" -eq 0 && "${_NEEDS_EV:-0}" -eq 0 ]]; then
+        aau_log "no actionable tasks (pending=${_REAL_PENDING}, needs_evidence=${_NEEDS_EV}), zero-token exit"
+        aau_jlog "info" "no_actionable_tasks" "\"pending\":${_REAL_PENDING},\"needs_evidence\":${_NEEDS_EV}"
+        exit 0
+    fi
+fi
+
 # Track launch count for cooldown detection
 echo "$NOW" >> "$COOLDOWN_LAUNCHES"
 # Keep only entries from last 30 minutes

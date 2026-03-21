@@ -58,7 +58,7 @@ NOW=$(date +%s)
 TEAM_DIR="$AAU_PROJECT_ROOT/team"
 REPORT_MARKER="${AAU_TMP}/${AAU_PREFIX}_last_report"
 DONE_SEED="${AAU_TMP}/${AAU_PREFIX}_autonomous_done_seed"
-REPORT_INTERVAL="${AAU_DIRECTOR_REPORT_INTERVAL:-7200}"
+REPORT_INTERVAL="${AAU_DIRECTOR_REPORT_INTERVAL:-3600}"
 STALE_THRESHOLD="${AAU_DIRECTOR_STALE_THRESHOLD:-1800}"
 REPORT_STATE_SEED="${AAU_TMP}/${AAU_PREFIX}_report_state_seed"
 MILESTONE_SEED="${AAU_TMP}/${AAU_PREFIX}_milestone_seed"
@@ -217,8 +217,60 @@ fi
 aau_log "action=$ACTION detail=$ACTION_DETAIL"
 aau_jlog "info" "state_decided" "\"action\":\"$ACTION\",\"detail\":\"$ACTION_DETAIL\""
 
-# ─── NO_ACTION → zero-token exit ────────────────────────────────────────
+# ─── NO_ACTION → heartbeat check, then zero-token exit ─────────────────
 if [[ "$ACTION" == "NO_ACTION" ]]; then
+    # ─── Heartbeat (zero-token) ─────────────────────────────────────────
+    # Post a brief status pulse to Slack every HEARTBEAT_INTERVAL seconds
+    # so the producer knows the system is alive, even when nothing changed.
+    HEARTBEAT_MARKER="${AAU_TMP}/${AAU_PREFIX}_heartbeat"
+    HEARTBEAT_INTERVAL="${AAU_DIRECTOR_HEARTBEAT_INTERVAL:-3600}"
+    SEND_HEARTBEAT=false
+    if [[ -f "$HEARTBEAT_MARKER" ]]; then
+        LAST_HB=$(aau_file_mtime "$HEARTBEAT_MARKER")
+        HB_AGE=$(( NOW - LAST_HB ))
+        if [[ "$HB_AGE" -gt "$HEARTBEAT_INTERVAL" ]]; then
+            SEND_HEARTBEAT=true
+        fi
+    else
+        SEND_HEARTBEAT=true
+    fi
+
+    if [[ "$SEND_HEARTBEAT" == "true" ]]; then
+        # Build summary from task files (pure bash, zero-token)
+        HB_TOTAL_P=0; HB_TOTAL_I=0; HB_TOTAL_D=0; HB_TOTAL_E=0
+        HB_MEMBER_LINES=""
+        for _M in $(aau_team_members); do
+            _TF="$TEAM_DIR/$_M/tasks.md"
+            if [[ -f "$_TF" ]]; then
+                _P=$(grep -c '\[PENDING\]' "$_TF" 2>/dev/null || true)
+                _I=$(grep -c '\[IN_PROGRESS\]' "$_TF" 2>/dev/null || true)
+                _D=$(grep -c '\[DONE\]' "$_TF" 2>/dev/null || true)
+                _E=$(grep -c '\[NEEDS_EVIDENCE\]' "$_TF" 2>/dev/null || true)
+                HB_TOTAL_P=$(( HB_TOTAL_P + _P ))
+                HB_TOTAL_I=$(( HB_TOTAL_I + _I ))
+                HB_TOTAL_D=$(( HB_TOTAL_D + _D ))
+                HB_TOTAL_E=$(( HB_TOTAL_E + _E ))
+                if [[ $(( _P + _I )) -gt 0 ]]; then
+                    HB_MEMBER_LINES="${HB_MEMBER_LINES}  ${_M}: P${_P}/I${_I}/D${_D}\n"
+                fi
+            fi
+        done
+        HB_TOTAL=$(( HB_TOTAL_P + HB_TOTAL_I + HB_TOTAL_D + HB_TOTAL_E ))
+        if [[ "$HB_TOTAL" -gt 0 ]]; then
+            HB_DONE_PCT=$(( HB_TOTAL_D * 100 / HB_TOTAL ))
+        else
+            HB_DONE_PCT=0
+        fi
+        HB_MSG="[Heartbeat] 稼働中 | 全${HB_TOTAL}件: 完了${HB_TOTAL_D}(${HB_DONE_PCT}%) 進行${HB_TOTAL_I} 待機${HB_TOTAL_P}"
+        if [[ "$HB_TOTAL_E" -gt 0 ]]; then
+            HB_MSG="${HB_MSG} 要証跡${HB_TOTAL_E}"
+        fi
+        aau_notify "$HB_MSG"
+        touch "$HEARTBEAT_MARKER"
+        aau_log "heartbeat sent"
+        aau_jlog "info" "heartbeat_sent" "\"pending\":$HB_TOTAL_P,\"inprogress\":$HB_TOTAL_I,\"done\":$HB_TOTAL_D"
+    fi
+
     aau_log "=== no action needed, exit ==="
     aau_jlog "info" "no_action_exit"
     exit 0
@@ -323,9 +375,19 @@ echo "$OUTPUT" >> "$_AAU_LOG_FILE"
 if [[ "$EXIT_CODE" -eq 124 ]]; then
     aau_log "session timed out after ${TIMEOUT}s"
     aau_jlog "error" "session_timeout" "\"action\":\"$ACTION\""
+    # Fallback: post minimal status via bash (zero-token recovery)
+    aau_notify "[Fallback] ${ACTION} セッションがタイムアウトしました (${TIMEOUT}s)。次回のサイクルでリトライします。"
+    aau_jlog "info" "fallback_notify" "\"action\":\"$ACTION\",\"reason\":\"timeout\""
 elif echo "$OUTPUT" | grep -qE "Reached max turns|^Error:|API error|rate limit exceeded" || [[ "$EXIT_CODE" -ne 0 ]]; then
     aau_log "session failed (exit=$EXIT_CODE, action=$ACTION)"
     aau_jlog "warn" "session_failed" "\"action\":\"$ACTION\",\"exit\":$EXIT_CODE"
+    # Fallback: post minimal status via bash (zero-token recovery)
+    FAIL_REASON="exit=$EXIT_CODE"
+    echo "$OUTPUT" | grep -qE "Reached max turns" && FAIL_REASON="max_turns超過"
+    echo "$OUTPUT" | grep -qE "rate limit" && FAIL_REASON="レート制限"
+    echo "$OUTPUT" | grep -qE "API error" && FAIL_REASON="APIエラー"
+    aau_notify "[Fallback] ${ACTION} セッションが失敗しました (${FAIL_REASON})。次回のサイクルでリトライします。"
+    aau_jlog "info" "fallback_notify" "\"action\":\"$ACTION\",\"reason\":\"$FAIL_REASON\""
 else
     aau_log "session succeeded (action=$ACTION)"
     aau_jlog "info" "session_succeeded" "\"action\":\"$ACTION\""

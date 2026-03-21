@@ -170,7 +170,7 @@ aau_render_prompt() {
 
     # Built-in variables
     content="${content//\{\{project_name\}\}/${AAU_PROJECT_NAME:-project}}"
-    content="${content//\{\{report_max_chars\}\}/${AAU_NOTIFICATION_REPORT_MAX_CHARS:-50}}"
+    content="${content//\{\{report_max_chars\}\}/${AAU_NOTIFICATION_REPORT_MAX_CHARS:-200}}"
     content="${content//\{\{report_style\}\}/${AAU_NOTIFICATION_REPORT_STYLE:-short}}"
 
     # Team member list
