@@ -1134,6 +1134,9 @@ def read_project_config(project_path: str) -> dict:
         "language": get_val("prompts", "language"),
         "notify_plugin": get_val("notification", "plugin"),
         **_parse_schedule_config(text),
+        "director_daily_max": int(get_val("director", "daily_max_invocations") or 20),
+        "agent_daily_max": int(get_val("agents", "daily_max") or 50),
+        "agent_max_rapid": int(get_val("agents", "max_rapid_launches") or 4),
         "llm_enabled": get_val("local_llm", "enabled") == "true",
         "slack_producer_id": get_val("slack", "producer_id"),
         "slack_bot_id": get_val("slack", "bot_id"),
@@ -1182,8 +1185,7 @@ director:
     respond: 40
   report_interval: 7200
   stale_threshold: 1800
-  daily_max_invocations: 20
-  daily_max_invocations: 20
+  daily_max_invocations: {cfg.get("director_daily_max", 20)}
 
 scheduling:
   task_monitor_interval: 300
@@ -1211,6 +1213,10 @@ local_llm:
 
 prompts:
   language: "{cfg.get("language", "ja")}"
+
+agents:
+  daily_max: {cfg.get("agent_daily_max", 50)}
+  max_rapid_launches: {cfg.get("agent_max_rapid", 4)}
 
 health:
   critical_patterns:
