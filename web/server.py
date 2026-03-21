@@ -753,6 +753,8 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_save_config()
         elif self.path == "/api/rescan":
             self._handle_rescan()
+        elif self.path == "/api/scan-folders":
+            self._handle_scan_folders()
         else:
             self.send_error(404)
 
@@ -793,6 +795,41 @@ class AAUHandler(http.server.SimpleHTTPRequestHandler):
             projects = {k: {"name": v["name"], "path": v["path"], "members": len(v["members"])}
                         for k, v in _projects.items()}
         self._json_response({"ok": True, "projects": projects})
+
+    def _handle_scan_folders(self):
+        """Scan ~/git/ for candidate project directories."""
+        git_root = pathlib.Path.home() / "git"
+        folders = []
+        if git_root.exists():
+            for d in sorted(git_root.iterdir()):
+                if not d.is_dir() or d.name.startswith("."):
+                    continue
+                has_aau = (d / "aau.yaml").exists()
+                has_git = (d / ".git").exists()
+                # Detect project type
+                ptype = "unknown"
+                if (d / "package.json").exists():
+                    ptype = "node"
+                elif (d / "Cargo.toml").exists():
+                    ptype = "rust"
+                elif (d / "go.mod").exists():
+                    ptype = "go"
+                elif (d / "requirements.txt").exists() or (d / "pyproject.toml").exists():
+                    ptype = "python"
+                elif (d / "project.godot").exists():
+                    ptype = "godot"
+                elif (d / "Gemfile").exists():
+                    ptype = "ruby"
+                elif has_git:
+                    ptype = "git"
+                folders.append({
+                    "name": d.name,
+                    "path": str(d),
+                    "has_aau": has_aau,
+                    "has_git": has_git,
+                    "type": ptype,
+                })
+        self._json_response({"ok": True, "folders": folders})
 
     def _handle_rescan(self):
         scan_all_projects()
@@ -918,6 +955,66 @@ def _default_tools_for(name, role=""):
     return DEFAULT_TOOLS
 
 
+def _parse_schedule_config(yaml_text: str) -> dict:
+    """Parse schedule: block from aau.yaml text."""
+    result = {
+        "schedule_timezone": "",
+        "schedule_active_hours": "",
+        "schedule_breaks": [],
+        "schedule_weekend_mode": "",
+        "schedule_weekend_active_hours": "",
+        "schedule_director_active_hours": "",
+        "schedule_agents_active_hours": "",
+    }
+    in_schedule = False
+    sub = ""  # "weekend", "overrides", "director", "agents", "breaks"
+    for line in yaml_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0 and stripped.endswith(":"):
+            in_schedule = stripped == "schedule:"
+            sub = ""
+            continue
+        if not in_schedule:
+            continue
+        # Sub-sections
+        if indent == 2 and stripped.endswith(":"):
+            sub = stripped[:-1]
+            continue
+        if indent == 4 and stripped.endswith(":"):
+            sub = stripped[:-1]  # "director" or "agents" under overrides
+            continue
+        # Values
+        if stripped.startswith("- "):
+            if sub == "breaks" or (sub == "" and "breaks" in (line[:indent] + "breaks")):
+                result["schedule_breaks"].append(stripped[2:].strip().strip('"'))
+            continue
+        if ":" not in stripped:
+            continue
+        k, v = stripped.split(":", 1)
+        k, v = k.strip(), v.strip().strip('"')
+        if sub == "" or sub == "schedule":
+            if k == "timezone": result["schedule_timezone"] = v
+            elif k == "active_hours": result["schedule_active_hours"] = v
+            elif k == "breaks": sub = "breaks"  # list follows
+        elif sub == "weekend":
+            if k == "mode": result["schedule_weekend_mode"] = v
+            elif k == "active_hours": result["schedule_weekend_active_hours"] = v
+        elif sub == "director":
+            if k == "active_hours": result["schedule_director_active_hours"] = v
+        elif sub == "agents":
+            if k == "active_hours": result["schedule_agents_active_hours"] = v
+    return result
+
+
+def _build_schedule_breaks(breaks):
+    if not breaks or not isinstance(breaks, list):
+        return "    # - \"12:00-13:00\"\n"
+    return "".join(f'    - "{b}"\n' for b in breaks if b)
+
+
 def _build_member_yaml(members):
     lines = []
     for m in members:
@@ -1036,8 +1133,7 @@ def read_project_config(project_path: str) -> dict:
         "prefix": get_val("runtime", "prefix"),
         "language": get_val("prompts", "language"),
         "notify_plugin": get_val("notification", "plugin"),
-        "quiet_start": get_val("director", "quiet_hours_start"),
-        "quiet_end": get_val("director", "quiet_hours_end"),
+        **_parse_schedule_config(text),
         "llm_enabled": get_val("local_llm", "enabled") == "true",
         "slack_producer_id": get_val("slack", "producer_id"),
         "slack_bot_id": get_val("slack", "bot_id"),
@@ -1087,8 +1183,7 @@ director:
   report_interval: 7200
   stale_threshold: 1800
   daily_max_invocations: 20
-  quiet_hours_start: {cfg.get("quiet_start", 0)}
-  quiet_hours_end: {cfg.get("quiet_end", 8)}
+  daily_max_invocations: 20
 
 scheduling:
   task_monitor_interval: 300
@@ -1134,6 +1229,19 @@ health:
   stale_threshold: 1500
   relaunch_window_min: 60
   relaunch_critical_count: 5
+
+schedule:
+  timezone: "{cfg.get("schedule_timezone", "Asia/Tokyo")}"
+  active_hours: "{cfg.get("schedule_active_hours", "08:00-23:00")}"
+  breaks:
+{_build_schedule_breaks(cfg.get("schedule_breaks", []))}  weekend:
+    mode: "{cfg.get("schedule_weekend_mode", "normal")}"
+    active_hours: "{cfg.get("schedule_weekend_active_hours", "")}"
+  overrides:
+    director:
+      active_hours: "{cfg.get("schedule_director_active_hours", "")}"
+    agents:
+      active_hours: "{cfg.get("schedule_agents_active_hours", "")}"
 
 slack:
   producer_id: "{cfg.get("slack_producer_id", "")}"
