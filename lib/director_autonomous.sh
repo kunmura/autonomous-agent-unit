@@ -238,7 +238,6 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
     if [[ "$SEND_HEARTBEAT" == "true" ]]; then
         # Build summary from task files (pure bash, zero-token)
         HB_TOTAL_P=0; HB_TOTAL_I=0; HB_TOTAL_D=0; HB_TOTAL_E=0
-        HB_MEMBER_LINES=""
         for _M in $(aau_team_members); do
             _TF="$TEAM_DIR/$_M/tasks.md"
             if [[ -f "$_TF" ]]; then
@@ -250,9 +249,6 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
                 HB_TOTAL_I=$(( HB_TOTAL_I + _I ))
                 HB_TOTAL_D=$(( HB_TOTAL_D + _D ))
                 HB_TOTAL_E=$(( HB_TOTAL_E + _E ))
-                if [[ $(( _P + _I )) -gt 0 ]]; then
-                    HB_MEMBER_LINES="${HB_MEMBER_LINES}  ${_M}: P${_P}/I${_I}/D${_D}\n"
-                fi
             fi
         done
         HB_TOTAL=$(( HB_TOTAL_P + HB_TOTAL_I + HB_TOTAL_D + HB_TOTAL_E ))
@@ -264,6 +260,13 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
         HB_MSG="[Heartbeat] 稼働中 | 全${HB_TOTAL}件: 完了${HB_TOTAL_D}(${HB_DONE_PCT}%) 進行${HB_TOTAL_I} 待機${HB_TOTAL_P}"
         if [[ "$HB_TOTAL_E" -gt 0 ]]; then
             HB_MSG="${HB_MSG} 要証跡${HB_TOTAL_E}"
+        fi
+        # Append task summaries from local LLM (zero Claude-token)
+        source "$SCRIPT_DIR/task_summarizer.sh"
+        HB_DETAIL=$(aau_task_summary_compact 600 2>/dev/null)
+        if [[ -n "$HB_DETAIL" && "$HB_DETAIL" != "(タスクなし)" ]]; then
+            HB_MSG="${HB_MSG}
+${HB_DETAIL}"
         fi
         aau_notify "$HB_MSG"
         touch "$HEARTBEAT_MARKER"
@@ -318,6 +321,17 @@ if [[ -z "$PROMPT" ]]; then
     aau_log "ERROR: prompt template $TEMPLATE not found, abort"
     aau_jlog "error" "missing_template" "\"template\":\"$TEMPLATE\""
     exit 1
+fi
+
+# Inject task summary from local LLM so Claude uses concrete descriptions
+source "$SCRIPT_DIR/task_summarizer.sh"
+TASK_SUMMARY=$(aau_task_summary 600 2>/dev/null)
+if [[ -n "$TASK_SUMMARY" && "$TASK_SUMMARY" != "(タスクなし)" ]]; then
+    PROMPT="${PROMPT}
+
+## タスク要約（ローカルLLM生成 — Slack報告時はこの要約を使うこと）
+TASK番号だけでなく、以下の要約を使って具体的に何をしているか伝えること:
+${TASK_SUMMARY}"
 fi
 
 # Inject notification instructions if plugin is configured

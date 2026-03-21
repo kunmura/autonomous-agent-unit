@@ -124,6 +124,17 @@ SLACK_CHANNEL=\"$SLACK_CHANNEL\"
 **curlを実行しないままinbox.mdをREADにしてはならない。**"
 fi
 
+# Inject task summary from local LLM so Claude uses concrete descriptions
+source "$SCRIPT_DIR/task_summarizer.sh"
+TASK_SUMMARY=$(aau_task_summary 600 2>/dev/null)
+if [[ -n "$TASK_SUMMARY" && "$TASK_SUMMARY" != "(タスクなし)" ]]; then
+    PROMPT="${PROMPT}
+
+## タスク要約（ローカルLLM生成 — Slack報告時はこの要約を使うこと）
+TASK番号だけでなく、以下の要約を使って具体的に何をしているか伝えること:
+${TASK_SUMMARY}"
+fi
+
 aau_log "launching Claude (max_turns=$MAX_TURNS)"
 aau_jlog "info" "claude_launch" "\"max_turns\":$MAX_TURNS"
 
