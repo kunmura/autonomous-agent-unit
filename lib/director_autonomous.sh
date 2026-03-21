@@ -144,10 +144,21 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
     for MEMBER in $(aau_team_members); do
         TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
         PROGRESS_FILE="$TEAM_DIR/$MEMBER/progress.md"
-        if [[ -f "$TASKS_FILE" ]] && grep -q '\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null; then
+        if [[ -f "$TASKS_FILE" ]] && grep -qE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null; then
             if [[ -f "$PROGRESS_FILE" ]]; then
                 PROG_AGE=$(( NOW - $(aau_file_mtime "$PROGRESS_FILE") ))
                 if [[ "$PROG_AGE" -gt "$STALE_THRESHOLD" ]]; then
+                    # Skip if we already failed STALE_PROGRESS for this member recently
+                    STALE_FAIL_MARKER="${AAU_TMP}/${AAU_PREFIX}_stale_fail_${MEMBER}"
+                    STALE_COOLDOWN="${AAU_STALE_FAIL_COOLDOWN:-7200}"
+                    if [[ -f "$STALE_FAIL_MARKER" ]]; then
+                        STALE_FAIL_AGE=$(( NOW - $(aau_file_mtime "$STALE_FAIL_MARKER") ))
+                        if [[ "$STALE_FAIL_AGE" -lt "$STALE_COOLDOWN" ]]; then
+                            aau_log "STALE_PROGRESS skip: $MEMBER failed recently (${STALE_FAIL_AGE}s ago, cooldown=${STALE_COOLDOWN}s)"
+                            aau_jlog "info" "stale_skip_cooldown" "\"member\":\"$MEMBER\",\"age\":$STALE_FAIL_AGE"
+                            continue
+                        fi
+                    fi
                     ACTION="STALE_PROGRESS"
                     ACTION_DETAIL="member=${MEMBER},progress_age=${PROG_AGE}s"
                     break
@@ -383,22 +394,47 @@ rm -f "$OUTFILE"
 echo "$OUTPUT" >> "$_AAU_LOG_FILE"
 
 # ─── Result handling ─────────────────────────────────────────────────────
+# Fallback dedup: don't post the same fallback message within 2 hours
+FALLBACK_MARKER="${AAU_TMP}/${AAU_PREFIX}_fallback_${ACTION}"
+FALLBACK_COOLDOWN=7200
+
+_should_post_fallback() {
+    if [[ -f "$FALLBACK_MARKER" ]]; then
+        local age=$(( NOW - $(aau_file_mtime "$FALLBACK_MARKER") ))
+        [[ "$age" -ge "$FALLBACK_COOLDOWN" ]]
+    else
+        return 0
+    fi
+}
+
 if [[ "$EXIT_CODE" -eq 124 ]]; then
     aau_log "session timed out after ${TIMEOUT}s"
     aau_jlog "error" "session_timeout" "\"action\":\"$ACTION\""
-    # Fallback: post minimal status via bash (zero-token recovery)
-    aau_notify "[Fallback] ${ACTION} セッションがタイムアウトしました (${TIMEOUT}s)。次回のサイクルでリトライします。"
-    aau_jlog "info" "fallback_notify" "\"action\":\"$ACTION\",\"reason\":\"timeout\""
+    if _should_post_fallback; then
+        aau_notify "[Fallback] ${ACTION} セッションがタイムアウトしました (${TIMEOUT}s)。2時間後にリトライします。"
+        touch "$FALLBACK_MARKER"
+    fi
+    # Mark STALE_PROGRESS failure for cooldown
+    if [[ "$ACTION" == "STALE_PROGRESS" ]]; then
+        STALE_MEMBER=$(echo "$ACTION_DETAIL" | grep -oE 'member=[a-z]+' | cut -d= -f2)
+        [[ -n "$STALE_MEMBER" ]] && touch "${AAU_TMP}/${AAU_PREFIX}_stale_fail_${STALE_MEMBER}"
+    fi
 elif echo "$OUTPUT" | grep -qE "Reached max turns|^Error:|API error|rate limit exceeded" || [[ "$EXIT_CODE" -ne 0 ]]; then
     aau_log "session failed (exit=$EXIT_CODE, action=$ACTION)"
     aau_jlog "warn" "session_failed" "\"action\":\"$ACTION\",\"exit\":$EXIT_CODE"
-    # Fallback: post minimal status via bash (zero-token recovery)
     FAIL_REASON="exit=$EXIT_CODE"
     echo "$OUTPUT" | grep -qE "Reached max turns" && FAIL_REASON="max_turns超過"
     echo "$OUTPUT" | grep -qE "rate limit" && FAIL_REASON="レート制限"
     echo "$OUTPUT" | grep -qE "API error" && FAIL_REASON="APIエラー"
-    aau_notify "[Fallback] ${ACTION} セッションが失敗しました (${FAIL_REASON})。次回のサイクルでリトライします。"
-    aau_jlog "info" "fallback_notify" "\"action\":\"$ACTION\",\"reason\":\"$FAIL_REASON\""
+    if _should_post_fallback; then
+        aau_notify "[Fallback] ${ACTION} セッションが失敗しました (${FAIL_REASON})。2時間後にリトライします。"
+        touch "$FALLBACK_MARKER"
+    fi
+    # Mark STALE_PROGRESS failure for cooldown
+    if [[ "$ACTION" == "STALE_PROGRESS" ]]; then
+        STALE_MEMBER=$(echo "$ACTION_DETAIL" | grep -oE 'member=[a-z]+' | cut -d= -f2)
+        [[ -n "$STALE_MEMBER" ]] && touch "${AAU_TMP}/${AAU_PREFIX}_stale_fail_${STALE_MEMBER}"
+    fi
 else
     aau_log "session succeeded (action=$ACTION)"
     aau_jlog "info" "session_succeeded" "\"action\":\"$ACTION\""
