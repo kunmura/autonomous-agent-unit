@@ -64,6 +64,58 @@ if [[ -f "$PROMISED" && -n "$PROMISE_ASSIGNEE" ]]; then
     fi
 fi
 
+# ── Stale IN_PROGRESS cleanup ──────────────────────────────────────────
+# Reset IN_PROGRESS tasks to PENDING if progress.md hasn't been updated
+# within STALE_INPROGRESS_THRESHOLD seconds. This prevents task accumulation.
+STALE_INPROGRESS_THRESHOLD="${AAU_STALE_INPROGRESS_THRESHOLD:-3600}"
+_NOW=$(date +%s)
+
+for MEMBER in $(aau_team_members); do
+    TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
+    PROGRESS_FILE="$TEAM_DIR/$MEMBER/progress.md"
+
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        continue
+    fi
+
+    IP_COUNT=$(grep -c '\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
+    if [[ "$IP_COUNT" -gt 3 ]]; then
+        # Too many IN_PROGRESS — check if progress is stale
+        PROG_AGE=$STALE_INPROGRESS_THRESHOLD
+        if [[ -f "$PROGRESS_FILE" ]]; then
+            PROG_AGE=$(( _NOW - $(aau_file_mtime "$PROGRESS_FILE") ))
+        fi
+        if [[ "$PROG_AGE" -ge "$STALE_INPROGRESS_THRESHOLD" ]]; then
+            # Keep at most 1 IN_PROGRESS (the most recent), reset rest to PENDING
+            RESET_COUNT=$(python3 - "$TASKS_FILE" << 'PYEOF'
+import sys, re
+tasks_file = sys.argv[1]
+with open(tasks_file, 'r') as f:
+    lines = f.read().split('\n')
+ip_indices = [i for i, l in enumerate(lines) if re.match(r'^###\s+TASK-\d+.*\[IN_PROGRESS\]', l)]
+if len(ip_indices) <= 1:
+    print(0)
+    sys.exit(0)
+keep = ip_indices[-1]
+count = 0
+for idx in ip_indices:
+    if idx != keep:
+        lines[idx] = lines[idx].replace('[IN_PROGRESS]', '[PENDING]')
+        count += 1
+with open(tasks_file, 'w') as f:
+    f.write('\n'.join(lines))
+print(count)
+PYEOF
+            )
+            if [[ "${RESET_COUNT:-0}" -gt 0 ]]; then
+                aau_log "$MEMBER: reset $RESET_COUNT stale IN_PROGRESS → PENDING (was $IP_COUNT)"
+                aau_jlog "info" "stale_inprogress_reset" "\"member\":\"$MEMBER\",\"reset\":$RESET_COUNT,\"was\":$IP_COUNT"
+            fi
+        fi
+    fi
+done
+
+# ── Main trigger scan ─────────────────────────────────────────────────
 for MEMBER in $(aau_team_members); do
     TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
     TRIGGER="${AAU_TMP}/${AAU_PREFIX}_trigger_${MEMBER}"

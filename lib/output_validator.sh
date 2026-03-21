@@ -27,7 +27,7 @@ VALIDATION_ISSUES=""
 # Find DONE tasks and their output files
 while IFS= read -r line; do
     # Extract task ID: ### TASK-XXX ... [DONE]
-    TASK_ID=$(echo "$line" | grep -oE 'TASK-[0-9]+')
+    TASK_ID=$(echo "$line" | grep -oE 'TASK-[0-9]+' | head -1)
     [[ -z "$TASK_ID" ]] && continue
 
     CHECKED=$((CHECKED + 1))
@@ -127,7 +127,7 @@ if [[ "$FAILED" -gt 0 ]]; then
 
     # For each failed task, change [DONE] → [NEEDS_EVIDENCE] in tasks.md
     while IFS= read -r line; do
-        TASK_ID=$(echo "$line" | grep -oE 'TASK-[0-9]+')
+        TASK_ID=$(echo "$line" | grep -oE 'TASK-[0-9]+' | head -1)
         [[ -z "$TASK_ID" ]] && continue
 
         OUTPUT_FILE=""
@@ -147,14 +147,34 @@ if [[ "$FAILED" -gt 0 ]]; then
         fi
 
         if [[ "$SHOULD_REVERT" -eq 1 ]]; then
-            # Replace [DONE] with [NEEDS_EVIDENCE] for this specific task
-            if [[ "$AAU_PLATFORM" == "Darwin" ]]; then
-                sed -i '' "s/### ${TASK_ID}.*\[DONE\]/### ${TASK_ID} [NEEDS_EVIDENCE]/" "$TASKS_FILE"
+            # Track retry count per task
+            RETRY_COUNTER="${AAU_TMP}/${AAU_PREFIX}_evidence_retry_${MEMBER}_${TASK_ID}"
+            RETRY_COUNT=0
+            [[ -f "$RETRY_COUNTER" ]] && RETRY_COUNT=$(cat "$RETRY_COUNTER" 2>/dev/null || echo 0)
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "$RETRY_COUNT" > "$RETRY_COUNTER"
+
+            MAX_EVIDENCE_RETRIES="${AAU_MAX_EVIDENCE_RETRIES:-3}"
+            if [[ "$RETRY_COUNT" -ge "$MAX_EVIDENCE_RETRIES" ]]; then
+                # Too many retries — escalate to REVIEW_REQUIRED (director must intervene)
+                if [[ "$AAU_PLATFORM" == "Darwin" ]]; then
+                    sed -i '' "s/### ${TASK_ID}.*\[DONE\]/### ${TASK_ID} [REVIEW_REQUIRED]/" "$TASKS_FILE"
+                else
+                    sed -i "s/### ${TASK_ID}.*\[DONE\]/### ${TASK_ID} [REVIEW_REQUIRED]/" "$TASKS_FILE"
+                fi
+                rm -f "$RETRY_COUNTER"
+                aau_log "ESCALATED: ${TASK_ID} → [REVIEW_REQUIRED] (failed evidence ${RETRY_COUNT}x)"
+                aau_jlog "error" "task_escalated" "\"member\":\"$MEMBER\",\"task\":\"$TASK_ID\",\"retries\":$RETRY_COUNT"
             else
-                sed -i "s/### ${TASK_ID}.*\[DONE\]/### ${TASK_ID} [NEEDS_EVIDENCE]/" "$TASKS_FILE"
+                # Normal revert
+                if [[ "$AAU_PLATFORM" == "Darwin" ]]; then
+                    sed -i '' "s/### ${TASK_ID}.*\[DONE\]/### ${TASK_ID} [NEEDS_EVIDENCE]/" "$TASKS_FILE"
+                else
+                    sed -i "s/### ${TASK_ID}.*\[DONE\]/### ${TASK_ID} [NEEDS_EVIDENCE]/" "$TASKS_FILE"
+                fi
+                aau_log "REVERTED: ${TASK_ID} → [NEEDS_EVIDENCE] (retry ${RETRY_COUNT}/${MAX_EVIDENCE_RETRIES})"
+                aau_jlog "warn" "task_reverted" "\"member\":\"$MEMBER\",\"task\":\"$TASK_ID\",\"retry\":$RETRY_COUNT"
             fi
-            aau_log "REVERTED: ${TASK_ID} → [NEEDS_EVIDENCE]"
-            aau_jlog "warn" "task_reverted" "\"member\":\"$MEMBER\",\"task\":\"$TASK_ID\""
         fi
 
     done < <(grep '\[DONE\]' "$TASKS_FILE" 2>/dev/null)
