@@ -67,17 +67,16 @@ rm -f "$TRIGGER"
 aau_log "trigger: $TRIGGER_CONTENT"
 
 # ─── Actionable task gate (zero-token) ────────────────────────────────
-# Even with a trigger, verify tasks.md has PENDING or NEEDS_EVIDENCE tasks.
-# IN_PROGRESS-only triggers cause IDLE sessions that waste tokens.
+# Verify tasks.md has work to do: PENDING, IN_PROGRESS, or NEEDS_EVIDENCE.
+# Skip only when there are truly no actionable tasks.
 TASKS_FILE="$AAU_PROJECT_ROOT/team/${MEMBER}/tasks.md"
 if [[ -f "$TASKS_FILE" ]]; then
-    _PENDING=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
-    _NEEDS_EV=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
-    # Exclude self-study tasks (same logic as task_monitor)
     _REAL_PENDING=$(grep -E '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null | grep -v "自主学習" | wc -l | tr -d ' ')
-    if [[ "${_REAL_PENDING:-0}" -eq 0 && "${_NEEDS_EV:-0}" -eq 0 ]]; then
-        aau_log "no actionable tasks (pending=${_REAL_PENDING}, needs_evidence=${_NEEDS_EV}), zero-token exit"
-        aau_jlog "info" "no_actionable_tasks" "\"pending\":${_REAL_PENDING},\"needs_evidence\":${_NEEDS_EV}"
+    _NEEDS_EV=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
+    _IN_PROG=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
+    if [[ "${_REAL_PENDING:-0}" -eq 0 && "${_NEEDS_EV:-0}" -eq 0 && "${_IN_PROG:-0}" -eq 0 ]]; then
+        aau_log "no actionable tasks (pending=${_REAL_PENDING}, in_progress=${_IN_PROG}, needs_evidence=${_NEEDS_EV}), zero-token exit"
+        aau_jlog "info" "no_actionable_tasks" "\"pending\":${_REAL_PENDING},\"in_progress\":${_IN_PROG},\"needs_evidence\":${_NEEDS_EV}"
         exit 0
     fi
 fi
