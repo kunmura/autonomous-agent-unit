@@ -11,6 +11,57 @@ aau_jlog "info" "start"
 
 TEAM_DIR="$AAU_PROJECT_ROOT/team"
 
+# ── Stale IN_PROGRESS cleanup (runs even during approval gate) ────────
+# Reset IN_PROGRESS tasks to PENDING if progress.md hasn't been updated
+# within STALE_INPROGRESS_THRESHOLD seconds. This prevents task accumulation.
+STALE_INPROGRESS_THRESHOLD="${AAU_STALE_INPROGRESS_THRESHOLD:-3600}"
+_NOW=$(date +%s)
+
+for MEMBER in $(aau_team_members); do
+    TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
+    PROGRESS_FILE="$TEAM_DIR/$MEMBER/progress.md"
+
+    if [[ ! -f "$TASKS_FILE" ]]; then
+        continue
+    fi
+
+    IP_COUNT=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
+    if [[ "$IP_COUNT" -gt 3 ]]; then
+        # >3 IN_PROGRESS is always abnormal — check time OR count threshold
+        PROG_AGE=0
+        if [[ -f "$PROGRESS_FILE" ]]; then
+            PROG_AGE=$(( _NOW - $(aau_file_mtime "$PROGRESS_FILE") ))
+        fi
+        # Reset if: stale (>1h) OR excessive (>5 IN_PROGRESS regardless of time)
+        if [[ "$PROG_AGE" -ge "$STALE_INPROGRESS_THRESHOLD" || "$IP_COUNT" -gt 5 ]]; then
+            RESET_COUNT=$(python3 - "$TASKS_FILE" << 'PYEOF'
+import sys, re
+tasks_file = sys.argv[1]
+with open(tasks_file, 'r') as f:
+    lines = f.read().split('\n')
+ip_indices = [i for i, l in enumerate(lines) if re.match(r'^###\s+TASK-\d+.*\[IN_PROGRESS\]', l)]
+if len(ip_indices) <= 1:
+    print(0)
+    sys.exit(0)
+keep = ip_indices[-1]
+count = 0
+for idx in ip_indices:
+    if idx != keep:
+        lines[idx] = lines[idx].replace('[IN_PROGRESS]', '[PENDING]')
+        count += 1
+with open(tasks_file, 'w') as f:
+    f.write('\n'.join(lines))
+print(count)
+PYEOF
+            )
+            if [[ "${RESET_COUNT:-0}" -gt 0 ]]; then
+                aau_log "$MEMBER: reset $RESET_COUNT stale IN_PROGRESS → PENDING (was $IP_COUNT)"
+                aau_jlog "info" "stale_inprogress_reset" "\"member\":\"$MEMBER\",\"reset\":$RESET_COUNT,\"was\":$IP_COUNT"
+            fi
+        fi
+    fi
+done
+
 # ── Approval gate: if status.md has "承認待ち", block ALL triggers ──
 STATUS_FILE="$TEAM_DIR/director/status.md"
 if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
@@ -64,57 +115,6 @@ if [[ -f "$PROMISED" && -n "$PROMISE_ASSIGNEE" ]]; then
     fi
 fi
 
-# ── Stale IN_PROGRESS cleanup ──────────────────────────────────────────
-# Reset IN_PROGRESS tasks to PENDING if progress.md hasn't been updated
-# within STALE_INPROGRESS_THRESHOLD seconds. This prevents task accumulation.
-STALE_INPROGRESS_THRESHOLD="${AAU_STALE_INPROGRESS_THRESHOLD:-3600}"
-_NOW=$(date +%s)
-
-for MEMBER in $(aau_team_members); do
-    TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
-    PROGRESS_FILE="$TEAM_DIR/$MEMBER/progress.md"
-
-    if [[ ! -f "$TASKS_FILE" ]]; then
-        continue
-    fi
-
-    IP_COUNT=$(grep -c '\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
-    if [[ "$IP_COUNT" -gt 3 ]]; then
-        # Too many IN_PROGRESS — check if progress is stale
-        PROG_AGE=$STALE_INPROGRESS_THRESHOLD
-        if [[ -f "$PROGRESS_FILE" ]]; then
-            PROG_AGE=$(( _NOW - $(aau_file_mtime "$PROGRESS_FILE") ))
-        fi
-        if [[ "$PROG_AGE" -ge "$STALE_INPROGRESS_THRESHOLD" ]]; then
-            # Keep at most 1 IN_PROGRESS (the most recent), reset rest to PENDING
-            RESET_COUNT=$(python3 - "$TASKS_FILE" << 'PYEOF'
-import sys, re
-tasks_file = sys.argv[1]
-with open(tasks_file, 'r') as f:
-    lines = f.read().split('\n')
-ip_indices = [i for i, l in enumerate(lines) if re.match(r'^###\s+TASK-\d+.*\[IN_PROGRESS\]', l)]
-if len(ip_indices) <= 1:
-    print(0)
-    sys.exit(0)
-keep = ip_indices[-1]
-count = 0
-for idx in ip_indices:
-    if idx != keep:
-        lines[idx] = lines[idx].replace('[IN_PROGRESS]', '[PENDING]')
-        count += 1
-with open(tasks_file, 'w') as f:
-    f.write('\n'.join(lines))
-print(count)
-PYEOF
-            )
-            if [[ "${RESET_COUNT:-0}" -gt 0 ]]; then
-                aau_log "$MEMBER: reset $RESET_COUNT stale IN_PROGRESS → PENDING (was $IP_COUNT)"
-                aau_jlog "info" "stale_inprogress_reset" "\"member\":\"$MEMBER\",\"reset\":$RESET_COUNT,\"was\":$IP_COUNT"
-            fi
-        fi
-    fi
-done
-
 # ── Main trigger scan ─────────────────────────────────────────────────
 for MEMBER in $(aau_team_members); do
     TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
@@ -124,14 +124,15 @@ for MEMBER in $(aau_team_members); do
         continue
     fi
 
-    # Support both [STATUS] and **Status**: STATUS formats
-    PENDING=$(grep -cE '\[PENDING\]|\*\*Status\*\*:\s*PENDING' "$TASKS_FILE" 2>/dev/null || true)
-    INPROGRESS=$(grep -cE '\[IN_PROGRESS\]|\*\*Status\*\*:\s*IN_PROGRESS' "$TASKS_FILE" 2>/dev/null || true)
-    NEEDS_EVIDENCE=$(grep -c '\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
-    BLOCKED=$(grep -cE '\[BLOCKED\]|\*\*Status\*\*:\s*BLOCKED' "$TASKS_FILE" 2>/dev/null || true)
+    # Count statuses only from task header lines (### TASK-XXX ... [STATUS])
+    # Prevents false matches from body text like "ステータスを[IN_PROGRESS]→[DONE]に更新"
+    PENDING=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
+    INPROGRESS=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
+    NEEDS_EVIDENCE=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
+    BLOCKED=$(grep -cE '^### TASK-.*\[BLOCKED\]' "$TASKS_FILE" 2>/dev/null || true)
 
     # Exclude self-study/learning tasks from pending count (prevent unnecessary agent launch)
-    REAL_PENDING=$(grep -E '\[PENDING\]|\*\*Status\*\*:\s*PENDING' "$TASKS_FILE" 2>/dev/null | grep -v "自主学習" | wc -l | tr -d ' ')
+    REAL_PENDING=$(grep -E '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null | grep -v "自主学習" | wc -l | tr -d ' ')
 
     if [[ "$BLOCKED" -gt 0 ]]; then
         aau_log "$MEMBER: $BLOCKED BLOCKED task(s) detected"

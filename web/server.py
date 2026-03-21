@@ -420,11 +420,17 @@ def get_task_status(proj: dict) -> list:
         pending = in_progress = done = needs_evidence = blocked = 0
         try:
             if tasks_file.exists():
+                import re as _re
                 content = tasks_file.read_text()
                 for line in content.splitlines():
+                    # Only count statuses from task header lines (### TASK-XXX ... [STATUS])
+                    if not _re.match(r'^###\s+TASK-', line):
+                        continue
                     upper = line.upper()
                     if "[NEEDS_EVIDENCE]" in upper:
                         needs_evidence += 1
+                    elif "[REVIEW_REQUIRED]" in upper:
+                        needs_evidence += 1  # show as evidence for now
                     elif "[BLOCKED]" in upper:
                         blocked += 1
                     elif "[PENDING]" in upper:

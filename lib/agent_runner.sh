@@ -71,10 +71,10 @@ aau_log "trigger: $TRIGGER_CONTENT"
 # IN_PROGRESS-only triggers cause IDLE sessions that waste tokens.
 TASKS_FILE="$AAU_PROJECT_ROOT/team/${MEMBER}/tasks.md"
 if [[ -f "$TASKS_FILE" ]]; then
-    _PENDING=$(grep -cE '\[PENDING\]|\*\*Status\*\*:\s*PENDING' "$TASKS_FILE" 2>/dev/null || true)
-    _NEEDS_EV=$(grep -c '\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
+    _PENDING=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
+    _NEEDS_EV=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
     # Exclude self-study tasks (same logic as task_monitor)
-    _REAL_PENDING=$(grep -E '\[PENDING\]|\*\*Status\*\*:\s*PENDING' "$TASKS_FILE" 2>/dev/null | grep -v "自主学習" | wc -l | tr -d ' ')
+    _REAL_PENDING=$(grep -E '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null | grep -v "自主学習" | wc -l | tr -d ' ')
     if [[ "${_REAL_PENDING:-0}" -eq 0 && "${_NEEDS_EV:-0}" -eq 0 ]]; then
         aau_log "no actionable tasks (pending=${_REAL_PENDING}, needs_evidence=${_NEEDS_EV}), zero-token exit"
         aau_jlog "info" "no_actionable_tasks" "\"pending\":${_REAL_PENDING},\"needs_evidence\":${_NEEDS_EV}"

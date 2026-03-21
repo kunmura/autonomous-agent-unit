@@ -94,10 +94,10 @@ if [[ "$ACTION" != "MILESTONE_REPORT" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]
     for MEMBER in $(aau_team_members); do
         TF="$TEAM_DIR/$MEMBER/tasks.md"
         if [[ -f "$TF" ]]; then
-            P=$(grep -c '\[PENDING\]' "$TF" 2>/dev/null || true)
-            I=$(grep -c '\[IN_PROGRESS\]' "$TF" 2>/dev/null || true)
-            D=$(grep -c '\[DONE\]' "$TF" 2>/dev/null || true)
-            E=$(grep -c '\[NEEDS_EVIDENCE\]' "$TF" 2>/dev/null || true)
+            P=$(grep -cE '^### TASK-.*\[PENDING\]' "$TF" 2>/dev/null || true)
+            I=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TF" 2>/dev/null || true)
+            D=$(grep -cE '^### TASK-.*\[DONE\]' "$TF" 2>/dev/null || true)
+            E=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$TF" 2>/dev/null || true)
             CURRENT_STATE="${CURRENT_STATE}${MEMBER}:${P}/${I}/${D}/${E} "
         fi
     done
@@ -199,8 +199,8 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
     for MEMBER in $(aau_team_members); do
         TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
         if [[ -f "$TASKS_FILE" ]]; then
-            P=$(grep -c '\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
-            I=$(grep -c '\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
+            P=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
+            I=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
             TOTAL_PENDING=$((TOTAL_PENDING + P))
             TOTAL_INPROG=$((TOTAL_INPROG + I))
         fi
@@ -238,10 +238,10 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
         for _M in $(aau_team_members); do
             _TF="$TEAM_DIR/$_M/tasks.md"
             if [[ -f "$_TF" ]]; then
-                _P=$(grep -c '\[PENDING\]' "$_TF" 2>/dev/null || true)
-                _I=$(grep -c '\[IN_PROGRESS\]' "$_TF" 2>/dev/null || true)
-                _D=$(grep -c '\[DONE\]' "$_TF" 2>/dev/null || true)
-                _E=$(grep -c '\[NEEDS_EVIDENCE\]' "$_TF" 2>/dev/null || true)
+                _P=$(grep -cE '^### TASK-.*\[PENDING\]' "$_TF" 2>/dev/null || true)
+                _I=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$_TF" 2>/dev/null || true)
+                _D=$(grep -cE '^### TASK-.*\[DONE\]' "$_TF" 2>/dev/null || true)
+                _E=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$_TF" 2>/dev/null || true)
                 HB_TOTAL_P=$(( HB_TOTAL_P + _P ))
                 HB_TOTAL_I=$(( HB_TOTAL_I + _I ))
                 HB_TOTAL_D=$(( HB_TOTAL_D + _D ))
@@ -418,7 +418,7 @@ else
             for M in $(aau_team_members); do
                 TF="$TEAM_DIR/$M/tasks.md"
                 [[ -f "$TF" ]] || continue
-                MD=$(grep -c '\[DONE\]' "$TF" 2>/dev/null || true)
+                MD=$(grep -cE '^### TASK-.*\[DONE\]' "$TF" 2>/dev/null || true)
                 [[ "$MD" -gt 0 ]] && DONE_NOW="${DONE_NOW}${M}:${MD} "
             done
             echo "$DONE_NOW" | aau_md5 > "$DONE_SEED"
