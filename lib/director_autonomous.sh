@@ -81,15 +81,38 @@ if [[ -f "$STATUS_FILE" ]]; then
     fi
 fi
 
-# --- 1. REPORT_DUE ---
-if [[ "$ACTION" != "MILESTONE_REPORT" ]] && [[ -f "$REPORT_MARKER" ]]; then
+# --- 1. DONE_FOLLOWUP (highest priority after MILESTONE) ---
+# Check before REPORT_DUE so new completions trigger task creation immediately
+if [[ "$ACTION" == "NO_ACTION" ]]; then
+    DONE_TASKS=""
+    for MEMBER in $(aau_team_members); do
+        TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
+        if [[ -f "$TASKS_FILE" ]]; then
+            M_DONE=$(grep -cE '^### TASK-.*\[DONE\]' "$TASKS_FILE" 2>/dev/null || true)
+            if [[ "$M_DONE" -gt 0 ]]; then
+                DONE_TASKS="${DONE_TASKS}${MEMBER}:${M_DONE} "
+            fi
+        fi
+    done
+    if [[ -n "$DONE_TASKS" ]]; then
+        CURRENT_HASH=$(echo "$DONE_TASKS" | aau_md5)
+        SEEDED_HASH=""
+        [[ -f "$DONE_SEED" ]] && SEEDED_HASH=$(cat "$DONE_SEED" 2>/dev/null)
+        if [[ "$CURRENT_HASH" != "$SEEDED_HASH" ]]; then
+            ACTION="DONE_FOLLOWUP"
+            ACTION_DETAIL="done_tasks=$DONE_TASKS"
+        fi
+    fi
+fi
+
+# --- 2. REPORT_DUE ---
+if [[ "$ACTION" != "MILESTONE_REPORT" && "$ACTION" != "DONE_FOLLOWUP" ]] && [[ -f "$REPORT_MARKER" ]]; then
     LAST_REPORT=$(aau_file_mtime "$REPORT_MARKER")
     REPORT_AGE=$(( NOW - LAST_REPORT ))
 else
     REPORT_AGE=$((REPORT_INTERVAL + 1))
 fi
-if [[ "$ACTION" != "MILESTONE_REPORT" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]; then
-    # Build state hash from all task statuses to detect actual changes
+if [[ "$ACTION" != "MILESTONE_REPORT" && "$ACTION" != "DONE_FOLLOWUP" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]; then
     CURRENT_STATE=""
     for MEMBER in $(aau_team_members); do
         TF="$TEAM_DIR/$MEMBER/tasks.md"
@@ -111,31 +134,7 @@ if [[ "$ACTION" != "MILESTONE_REPORT" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]
     else
         aau_log "report interval passed but no state change, skip"
         aau_jlog "info" "report_skip_no_change" "\"age\":$REPORT_AGE"
-        # Touch marker to reset timer (avoid checking every 30min)
         touch "$REPORT_MARKER"
-    fi
-fi
-
-# --- 2. DONE_FOLLOWUP ---
-if [[ "$ACTION" == "NO_ACTION" || "$ACTION" == "REPORT_DUE" ]]; then
-    DONE_TASKS=""
-    for MEMBER in $(aau_team_members); do
-        TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
-        if [[ -f "$TASKS_FILE" ]]; then
-            M_DONE=$(grep -c '\[DONE\]' "$TASKS_FILE" 2>/dev/null || true)
-            if [[ "$M_DONE" -gt 0 ]]; then
-                DONE_TASKS="${DONE_TASKS}${MEMBER}:${M_DONE} "
-            fi
-        fi
-    done
-    if [[ -n "$DONE_TASKS" ]]; then
-        CURRENT_HASH=$(echo "$DONE_TASKS" | aau_md5)
-        SEEDED_HASH=""
-        [[ -f "$DONE_SEED" ]] && SEEDED_HASH=$(cat "$DONE_SEED" 2>/dev/null)
-        if [[ "$CURRENT_HASH" != "$SEEDED_HASH" ]]; then
-            ACTION="DONE_FOLLOWUP"
-            ACTION_DETAIL="done_tasks=$DONE_TASKS"
-        fi
     fi
 fi
 
