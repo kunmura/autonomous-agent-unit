@@ -401,9 +401,14 @@ def state_file() -> Path:
 
 
 def read_state() -> dict:
+    import time as _time
     state = {"slack_ts": "0"}
     sf = state_file()
     if not sf.exists():
+        # No state file = fresh start. Use current time to skip all history.
+        state["slack_ts"] = str(_time.time())
+        write_state(state)
+        log("No last_check.md found — initialized to current time (skip history)")
         return state
     content = sf.read_text()
     ts_match = re.search(r"last_ts:\s*([\d.]+)", content)
@@ -443,7 +448,13 @@ def append_inbox(entry: str):
 
 # ── Slack監視 ────────────────────────────────────────────────────────
 def check_slack(state: dict) -> str:
+    import time as _time
     last_ts = state.get("slack_ts", "0")
+    # Safety: if ts is "0" or very old (>24h), reset to current time to avoid history flood
+    if last_ts == "0" or (float(last_ts) < _time.time() - 86400):
+        last_ts = str(_time.time())
+        state["slack_ts"] = last_ts
+        log(f"slack_ts was stale/zero — reset to current time")
     producer_id = _cfg.get("producer_id", "")
 
     if not producer_id:
