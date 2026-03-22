@@ -51,6 +51,10 @@ curl -s -F file=@team/director/output/approval_request_phaseN.pptx \
    - フェーズ全体が完了した → **承認ゲートを発動**（次フェーズに進まない）
    - 内部タスクのみ完了した → Slack投稿不要（status.md更新のみ）
 5. team/director/status.md を更新
+6. **team/director/roadmap.md を更新**（存在する場合）:
+   - 完了タスクに対応するアイテムを `[x]` にチェック
+   - スプリント内の全アイテム完了 → スプリントの status を DONE に
+   - マイルストーン内の全スプリント完了 → マイルストーンの status を DONE に
 
 ## Slackでの報告内容（プロデューサー向け）
 社内メモではなく、**プロデューサーへの報告**として書く:

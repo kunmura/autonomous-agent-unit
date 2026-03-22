@@ -119,3 +119,49 @@ aau_task_summary_compact() {
         for (m in lines) print m ": " lines[m]
     }'
 }
+
+# Roadmap progress summary (one-liner for heartbeat/reports)
+aau_roadmap_summary() {
+    local _roadmap="$AAU_PROJECT_ROOT/team/director/roadmap.md"
+    [[ -f "$_roadmap" ]] || { echo "(ロードマップなし)"; return 0; }
+
+    python3 - "$_roadmap" << 'PYEOF'
+import re, sys
+from pathlib import Path
+
+roadmap = Path(sys.argv[1]).read_text(errors="ignore")
+
+# Find active milestone and sprint
+active_ms = ""
+active_sp = ""
+current_section = ""
+for line in roadmap.splitlines():
+    ms = re.match(r'^## MILESTONE:\s*(.+)', line)
+    sp = re.match(r'^### SPRINT:\s*(.+)', line)
+    st = re.match(r'^status:\s*(.+)', line.strip())
+    if ms:
+        current_section = "ms"
+        _ms_name = ms.group(1).strip()
+    elif sp:
+        current_section = "sp"
+        _sp_name = sp.group(1).strip()
+    elif st and st.group(1).strip() == "IN_PROGRESS":
+        if current_section == "ms":
+            active_ms = _ms_name
+        elif current_section == "sp":
+            active_sp = _sp_name
+
+total = len(re.findall(r'^\- \[[ x]\]', roadmap, re.MULTILINE))
+done = len(re.findall(r'^\- \[x\]', roadmap, re.MULTILINE))
+pct = (done * 100 // total) if total > 0 else 0
+
+if active_ms:
+    parts = [f"ロードマップ: {active_ms}"]
+    if active_sp:
+        parts.append(f"/ {active_sp}")
+    parts.append(f"({pct}%完了, {done}/{total})")
+    print(" ".join(parts))
+else:
+    print(f"ロードマップ: 全{total}件中{done}件完了 ({pct}%)")
+PYEOF
+}

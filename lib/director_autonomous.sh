@@ -269,10 +269,16 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
         if [[ "$HB_TOTAL_E" -gt 0 ]]; then
             HB_MSG="${HB_MSG} 要証跡${HB_TOTAL_E}"
         fi
-        # Append task summaries from local LLM (zero Claude-token)
+        # Append roadmap progress (zero Claude-token)
         source "$SCRIPT_DIR/task_summarizer.sh"
+        HB_ROADMAP=$(aau_roadmap_summary 2>/dev/null)
+        if [[ -n "$HB_ROADMAP" && "$HB_ROADMAP" != "(ロードマップなし)" ]]; then
+            HB_MSG="${HB_MSG}
+${HB_ROADMAP}"
+        fi
+        # Append task summaries from local LLM (zero Claude-token)
         HB_DETAIL=$(aau_task_summary_compact 600 2>/dev/null)
-        if [[ -n "$HB_DETAIL" && "$HB_DETAIL" != "(タスクなし)" ]]; then
+        if [[ -n "$HB_DETAIL" && "$HB_DETAIL" != *"タスクなし"* ]]; then
             HB_MSG="${HB_MSG}
 ${HB_DETAIL}"
         fi
@@ -296,6 +302,31 @@ if [[ "$ACTION" == "APPROVAL_REMINDER" ]]; then
     exit 0
 fi
 
+# ─── STALE_PROGRESS → zero-token auto-decompose ─────────────────────────
+if [[ "$ACTION" == "STALE_PROGRESS" ]]; then
+    cd "$AAU_PROJECT_ROOT"
+    source "$SCRIPT_DIR/task_decomposer.sh"
+    STALE_MEMBER=$(echo "$ACTION_DETAIL" | grep -oE 'member=[a-z]+' | cut -d= -f2)
+    aau_log "auto-decompose: attempting for $STALE_MEMBER"
+
+    if aau_decompose_stale_task "$STALE_MEMBER"; then
+        aau_notify "[Auto-Split] ${STALE_MEMBER}の停滞タスクを分割しました。サブタスクを順次処理します。"
+        aau_jlog "info" "stale_auto_decomposed" "\"member\":\"$STALE_MEMBER\""
+    else
+        # Ollama failed — fall back to Claude with limited template
+        aau_log "auto-decompose failed, falling back to Claude"
+        touch "${AAU_TMP}/${AAU_PREFIX}_stale_fail_${STALE_MEMBER}"
+        # Notify producer only once (fallback dedup handles this)
+        if _should_post_fallback 2>/dev/null; then
+            aau_notify "[Stale] ${STALE_MEMBER}のタスク自動分割に失敗。プロデューサー確認をお願いします。"
+            touch "${AAU_TMP}/${AAU_PREFIX}_fallback_STALE_PROGRESS"
+        fi
+    fi
+    aau_log "=== done (stale_auto_decompose) ==="
+    aau_jlog "info" "done" "\"action\":\"STALE_PROGRESS\",\"method\":\"auto_decompose\""
+    exit 0
+fi
+
 # ─── Render prompt from template ─────────────────────────────────────────
 cd "$AAU_PROJECT_ROOT"
 OUTFILE="${AAU_TMP}/${AAU_PREFIX}_director_autonomous_$$.out"
@@ -315,6 +346,7 @@ case "$ACTION" in
         MAX_TURNS="${AAU_DIRECTOR_MAX_TURNS_FOLLOWUP:-20}"
         ;;
     STALE_PROGRESS)
+        # Fallback only — normally handled by zero-token above
         TEMPLATE="director_stale_progress.txt"
         MAX_TURNS="${AAU_DIRECTOR_MAX_TURNS_STALE:-10}"
         ;;
