@@ -628,6 +628,11 @@ def check_team_files(state: dict) -> dict:
 
 # ── Bot約束追跡 ──────────────────────────────────────────────────────
 def scan_bot_promises(state: dict):
+    # Disabled: promise detection causes massive junk task generation
+    # because bot replies contain phrases like "お送りします", "即着手可能"
+    # that match PROMISE_PHRASES. Re-enable only with much stricter filtering.
+    return
+
     bot_id = _cfg.get("bot_id", "")
     if not bot_id:
         return

@@ -76,6 +76,9 @@ if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS
     exit 0
 fi
 
+# ── promised.md PENDING → auto-convert (DISABLED: causes junk task spam) ──
+# Re-enable only after promise detection in slack_monitor is fixed.
+if false; then
 # ── promised.md PENDING → auto-convert to assistant tasks ──────────
 PROMISED="$TEAM_DIR/director/promised.md"
 # Find the first member to use as promise assignee (prefer "assistant", fallback to first member)
@@ -114,6 +117,7 @@ if [[ -f "$PROMISED" && -n "$PROMISE_ASSIGNEE" ]]; then
         done < <(grep -E '^\#\# \[PENDING\]' "$PROMISED")
     fi
 fi
+fi  # end of disabled promise block
 
 # ── Main trigger scan ─────────────────────────────────────────────────
 for MEMBER in $(aau_team_members); do
