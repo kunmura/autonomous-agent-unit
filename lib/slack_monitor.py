@@ -217,9 +217,14 @@ def detect_intent(text: str) -> str:
     # Short reactions (≤10 chars and contains reaction keyword)
     if len(text) <= 10 and any(p in text_lower for p in REACTION_PHRASES):
         return INTENT_REACTION
-    # Emoji-only messages (no ASCII content)
-    ascii_chars = sum(1 for c in text if ord(c) < 128 and c.strip())
-    if len(text) <= 5 and ascii_chars == 0:
+    # Emoji-only messages (only emoji, no CJK/kana/numbers)
+    # Exclude: Japanese text, numbered choices (①②③), short instructions
+    import unicodedata
+    has_text_char = any(
+        unicodedata.category(c).startswith(("L", "N"))  # Letter or Number
+        for c in text if not c.isspace()
+    )
+    if len(text) <= 3 and not has_text_char:
         return INTENT_REACTION
 
     # Status query
