@@ -235,7 +235,7 @@ PYEOF
     )
 
     if [[ "$result" == "SPRINT_COMPLETE" ]]; then
-        # Create formal approval request with PPT
+        # Register approval (PENDING in approvals.md)
         source "$SCRIPT_DIR/approval.sh"
         source "$SCRIPT_DIR/task_summarizer.sh"
         local _roadmap_info
@@ -243,6 +243,8 @@ PYEOF
         aau_create_approval "スプリント完了 — 次フェーズ移行" "${_roadmap_info}"
         aau_log "idle_all: sprint complete, approval request created"
         aau_jlog "info" "idle_all_sprint_complete"
+        # Signal director_autonomous to create PPT via Claude session
+        echo "APPROVAL_PPT" > "${AAU_TMP}/${AAU_PREFIX}_trigger_approval_ppt"
         return 0
     fi
 

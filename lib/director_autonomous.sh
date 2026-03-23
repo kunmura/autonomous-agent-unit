@@ -81,6 +81,17 @@ if [[ -f "$STATUS_FILE" ]]; then
     fi
 fi
 
+# --- 0.3. APPROVAL_PPT (director creates approval PPT via Claude) ---
+if [[ "$ACTION" == "NO_ACTION" ]]; then
+    APPROVAL_PPT_TRIGGER="${AAU_TMP}/${AAU_PREFIX}_trigger_approval_ppt"
+    if [[ -f "$APPROVAL_PPT_TRIGGER" ]]; then
+        ACTION="APPROVAL_PPT"
+        # Get the latest PENDING AP-ID
+        ACTION_DETAIL="$(grep -B1 '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null | grep '^## AP-' | tail -1 | sed 's/^## //')"
+        rm -f "$APPROVAL_PPT_TRIGGER"
+    fi
+fi
+
 # --- 0.5. PHASE_COMPLETE (pipeline phase completion) ---
 if [[ "$ACTION" == "NO_ACTION" ]]; then
     PHASE_TRIGGER="${AAU_TMP}/${AAU_PREFIX}_trigger_phase_complete"
@@ -454,9 +465,19 @@ case "$ACTION" in
         TEMPLATE="director_idle_all.txt"
         MAX_TURNS="${AAU_DIRECTOR_MAX_TURNS_IDLE:-25}"
         ;;
+    APPROVAL_PPT)
+        TEMPLATE="director_approval_ppt.txt"
+        MAX_TURNS="${AAU_DIRECTOR_MAX_TURNS_APPROVAL:-30}"
+        ;;
 esac
 
-PROMPT=$(aau_render_prompt "$TEMPLATE" "action_detail=$ACTION_DETAIL")
+# Extract AP-ID for approval templates
+_AP_ID=""
+if [[ "$ACTION" == "APPROVAL_PPT" ]]; then
+    _AP_ID=$(echo "$ACTION_DETAIL" | grep -oE 'AP-[0-9]+' | head -1)
+    _AP_SUMMARY=$(echo "$ACTION_DETAIL" | sed 's/^AP-[0-9]* //')
+fi
+PROMPT=$(aau_render_prompt "$TEMPLATE" "action_detail=$ACTION_DETAIL" "ap_id=${_AP_ID}" "summary=${_AP_SUMMARY}")
 if [[ -z "$PROMPT" ]]; then
     aau_log "ERROR: prompt template $TEMPLATE not found, abort"
     aau_jlog "error" "missing_template" "\"template\":\"$TEMPLATE\""
@@ -508,12 +529,19 @@ fi
 TIMEOUT="${AAU_DIRECTOR_TIMEOUT:-600}"
 echo $(( DAILY_COUNT + 1 )) > "$DAILY_FILE"
 
-aau_log "launching Claude (action=$ACTION, max_turns=$MAX_TURNS)"
-aau_jlog "info" "claude_launch" "\"action\":\"$ACTION\",\"max_turns\":$MAX_TURNS"
+# Use Opus for approval PPT if configured
+DIRECTOR_MODEL="$AAU_MODEL"
+if [[ "$ACTION" == "APPROVAL_PPT" ]]; then
+    DIRECTOR_MODEL="${AAU_DIRECTOR_APPROVAL_MODEL:-${AAU_MODEL}}"
+    TIMEOUT="${AAU_DIRECTOR_APPROVAL_TIMEOUT:-900}"
+fi
+
+aau_log "launching Claude (action=$ACTION, model=$DIRECTOR_MODEL, max_turns=$MAX_TURNS)"
+aau_jlog "info" "claude_launch" "\"action\":\"$ACTION\",\"model\":\"$DIRECTOR_MODEL\",\"max_turns\":$MAX_TURNS"
 
 DIRECTOR_TOOLS="Read,Write,Edit,Bash"
 aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
-    --model "$AAU_MODEL" \
+    --model "$DIRECTOR_MODEL" \
     --print \
     --permission-mode "$AAU_PERM" \
     --max-turns "$MAX_TURNS" \

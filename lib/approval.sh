@@ -57,7 +57,16 @@ EOF
     aau_log "approval created: ${ap_id} — ${summary}"
     aau_jlog "info" "approval_created" "\"id\":\"$ap_id\",\"summary\":\"${summary:0:60}\""
 
-    # Generate PPT (zero-token) — self-contained document with embedded images & reports
+    # PPT generation mode: "director" (Claude session) or "auto" (zero-token fallback)
+    local ppt_mode="${AAU_APPROVAL_PPT_MODE:-auto}"
+    if [[ "$ppt_mode" == "director" ]]; then
+        # Director Claude session will create the PPT — just notify
+        aau_log "approval PPT deferred to director session: $ap_id"
+        aau_notify_flush "承認依頼 ${ap_id}: ${summary} — ディレクターがPPT資料を作成中です。しばらくお待ちください。"
+        return 0
+    fi
+
+    # Generate PPT (zero-token fallback) — self-contained document with embedded images & reports
     mkdir -p "$(dirname "$ppt_path")"
     python3 - "$ap_id" "$summary" "$context" "$ppt_path" "$AAU_PROJECT_ROOT" << 'PYEOF'
 import sys, os, re

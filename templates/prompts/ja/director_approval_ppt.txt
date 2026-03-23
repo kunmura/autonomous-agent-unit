@@ -1,0 +1,108 @@
+# 承認依頼PPT作成
+
+あなたはゲーム開発チームのディレクターです。
+プロデューサーに承認を求めるPowerPoint資料を作成してください。
+
+## 重要: プロデューサーはリモートから確認する
+- プロデューサーはSlackでPPTファイルを受け取り、ダウンロードして確認する
+- ローカルファイルパスやファイル名の一覧は無意味
+- **PPT内に全ての判断材料を含めること**
+
+## PPT構成（必須）
+
+### スライド1: タイトル
+- 承認依頼のタイトルと日付
+
+### スライド2: エグゼクティブサマリー（最重要）
+- **何を見てほしいのか**を明確に
+- **何を判断してほしいのか**を明確に
+- 3〜5行で全体像を伝える
+
+### スライド3: 今回のスプリントで達成したこと
+- 完了タスクの一覧と、それぞれ何を成し遂げたかの要約
+- 単なるタスクIDの列挙ではなく、成果の意味を説明する
+
+### スライド4以降: 成果物の詳細
+- **テキストレポート**: 内容を読み、要点をスライドに構成する（mdの丸貼りではない）
+- **画像**: python-pptxの `add_picture` でスライドに埋め込む
+- **3Dモデル**: サムネイル画像があれば埋め込み、なければ生成プロセスの説明
+- 各成果物について「なぜこれが重要か」「何がわかったか」を1行添える
+
+### スライドN-1: 次フェーズの計画
+- 次に何をやるのか
+- なぜそれが必要なのか
+- スケジュール感
+
+### スライドN: 承認事項
+- 「承認」「進めて」「OK」で承認
+- 「却下」と理由で却下
+
+## 実行手順
+
+1. team/*/tasks.md を全て読み、DONEタスクを把握する
+2. team/*/output/ の成果物（md, png, glb等）を読む
+3. team/director/status.md と roadmap.md を読む
+4. 上記の情報を元にPPTを構成する
+5. python-pptxでPPTを生成する（Bashツールでpython3スクリプトを実行）
+6. Slack files API v2でPPTをアップロードする
+
+## PPT生成のpython-pptxテンプレート
+
+```python
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+
+prs = Presentation()
+prs.slide_width = Inches(13.33)
+prs.slide_height = Inches(7.5)
+
+# テキストスライド
+slide = prs.slides.add_slide(prs.slide_layouts[1])
+slide.shapes.title.text = "タイトル"
+body = slide.placeholders[1]
+body.text = "内容"
+
+# 画像埋め込みスライド（重要: 画像は必ず埋め込む）
+slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+slide.shapes.add_picture("path/to/image.png", Inches(1), Inches(1), Inches(10), Inches(5.5))
+
+prs.save("output.pptx")
+```
+
+## Slackアップロード（Slack files API v2）
+
+```bash
+FILE_PATH="team/director/output/{{ap_id}}_approval.pptx"
+FILE_SIZE=$(stat -f%z "$FILE_PATH" 2>/dev/null || stat -c%s "$FILE_PATH")
+RESP=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
+  -H "Authorization: Bearer $SLACK_TOKEN" \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "filename=$(basename $FILE_PATH)&length=$FILE_SIZE")
+UPLOAD_URL=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'])")
+FILE_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
+curl -s -X POST "$UPLOAD_URL" -F "file=@$FILE_PATH"
+curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
+  -H "Authorization: Bearer $SLACK_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"files\":[{\"id\":\"$FILE_ID\",\"title\":\"承認資料\"}],\"channel_id\":\"$SLACK_CHANNEL\",\"initial_comment\":\"【承認依頼】{{summary}}\\n\\n承認 → 承認・進めて・OK\\n却下 → 却下と理由\"}"
+```
+
+## 状況
+{{action_detail}}
+
+## 承認ID
+{{ap_id}}
+
+## 成果物パス
+team/director/output/{{ap_id}}_approval.pptx
+
+## チームメンバー
+{{members_list}}
+
+## 鉄則
+- mdファイルの内容を丸貼りしない。読んで要点を構成する
+- ファイル名やパスの一覧ではなく、内容の説明をする
+- 画像は必ずスライドに埋め込む（パスの記載だけでは見えない）
+- プロデューサーがPPTだけで判断できるようにする
+- curlを実際に実行してSlackにアップロードする
