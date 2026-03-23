@@ -81,6 +81,16 @@ if [[ -f "$STATUS_FILE" ]]; then
     fi
 fi
 
+# --- 0.5. PHASE_COMPLETE (pipeline phase completion) ---
+if [[ "$ACTION" == "NO_ACTION" ]]; then
+    PHASE_TRIGGER="${AAU_TMP}/${AAU_PREFIX}_trigger_phase_complete"
+    if [[ -f "$PHASE_TRIGGER" ]]; then
+        ACTION="PHASE_COMPLETE"
+        ACTION_DETAIL="$(cat "$PHASE_TRIGGER")"
+        rm -f "$PHASE_TRIGGER"
+    fi
+fi
+
 # --- 1. DONE_FOLLOWUP (highest priority after MILESTONE) ---
 # Check before REPORT_DUE so new completions trigger task creation immediately
 if [[ "$ACTION" == "NO_ACTION" ]]; then
@@ -308,6 +318,28 @@ if [[ "$ACTION" == "APPROVAL_REMINDER" ]]; then
     touch "$APPROVAL_REMINDER_MARKER"
     aau_log "=== approval reminder sent, exit ==="
     aau_jlog "info" "approval_reminder_sent"
+    exit 0
+fi
+
+# ─── PHASE_COMPLETE → zero-token pipeline advance ────────────────────────
+if [[ "$ACTION" == "PHASE_COMPLETE" ]]; then
+    cd "$AAU_PROJECT_ROOT"
+    source "$SCRIPT_DIR/pipeline.sh"
+    REQUIRE_APPROVAL="${AAU_PIPELINE_REQUIRE_APPROVAL:-true}"
+    if [[ "$REQUIRE_APPROVAL" == "true" ]]; then
+        source "$SCRIPT_DIR/approval.sh"
+        source "$SCRIPT_DIR/dashboard.sh"
+        PHASE_INFO=$(aau_pipeline_status)
+        PHASE_NAME=$(echo "$PHASE_INFO" | cut -d'|' -f2)
+        DASH_TEXT=$(aau_dashboard_summary 2>/dev/null)
+        aau_create_approval "Phase完了: ${PHASE_NAME} — 次フェーズ移行" "${DASH_TEXT}"
+    else
+        aau_pipeline_advance
+        source "$SCRIPT_DIR/dashboard.sh"
+        aau_update_dashboard
+    fi
+    aau_log "=== done (phase_complete) ==="
+    aau_jlog "info" "done" "\"action\":\"PHASE_COMPLETE\""
     exit 0
 fi
 

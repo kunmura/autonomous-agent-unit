@@ -141,14 +141,30 @@ PYEOF
 却下する場合 → 「${ap_id} 却下 理由: ...」
 とSlackに投稿してください。"
 
-            curl -s -F "file=@${ppt_path}" \
-                -F "channels=${SLACK_CHANNEL}" \
-                -F "initial_comment=${upload_msg}" \
+            local file_size
+            file_size=$(stat -f%z "$ppt_path" 2>/dev/null || stat -c%s "$ppt_path" 2>/dev/null)
+            local filename
+            filename=$(basename "$ppt_path")
+            local resp
+            resp=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
                 -H "Authorization: Bearer ${SLACK_TOKEN}" \
-                https://slack.com/api/files.upload > /dev/null 2>&1
-
-            aau_log "approval PPT uploaded to Slack: $ap_id"
-            aau_jlog "info" "approval_ppt_uploaded" "\"id\":\"$ap_id\""
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                -d "filename=${filename}&length=${file_size}")
+            local upload_url file_id
+            upload_url=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null)
+            file_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_id',''))" 2>/dev/null)
+            if [[ -n "$upload_url" && -n "$file_id" ]]; then
+                curl -s -X POST "$upload_url" -F "file=@${ppt_path}" > /dev/null 2>&1
+                curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
+                    -H "Authorization: Bearer ${SLACK_TOKEN}" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"files\":[{\"id\":\"${file_id}\",\"title\":\"${ap_id} 承認資料\"}],\"channel_id\":\"${SLACK_CHANNEL}\",\"initial_comment\":$(python3 -c "import json; print(json.dumps('''${upload_msg}'''))")}" > /dev/null 2>&1
+                aau_log "approval PPT uploaded to Slack: $ap_id"
+                aau_jlog "info" "approval_ppt_uploaded" "\"id\":\"$ap_id\""
+            else
+                aau_log "approval PPT upload failed (getUploadURLExternal): $resp"
+                aau_notify_flush "${ap_id}: ${summary} — PPT作成済みですがアップロードに失敗しました"
+            fi
         else
             aau_notify_flush "${ap_id}: ${summary} — PPT作成済み（Slack未設定のため手動確認してください）"
         fi

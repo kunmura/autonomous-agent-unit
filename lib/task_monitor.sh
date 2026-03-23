@@ -152,5 +152,29 @@ for MEMBER in $(aau_team_members); do
     fi
 done
 
+# ── Dashboard auto-update ────────────────────────────────────────
+if [[ -f "$SCRIPT_DIR/dashboard.sh" ]]; then
+    source "$SCRIPT_DIR/dashboard.sh"
+    aau_update_dashboard
+fi
+
+# ── Pipeline sync + phase completion detection ───────────────────
+if [[ -f "$SCRIPT_DIR/pipeline.sh" ]]; then
+    source "$SCRIPT_DIR/pipeline.sh"
+    if aau_pipeline_exists; then
+        aau_pipeline_sync
+        if aau_pipeline_check_complete; then
+            PHASE_TRIGGER="${AAU_TMP}/${AAU_PREFIX}_trigger_phase_complete"
+            if [[ ! -f "$PHASE_TRIGGER" ]]; then
+                PHASE_INFO=$(aau_pipeline_status)
+                echo "phase_complete=1 info=$PHASE_INFO" > "$PHASE_TRIGGER"
+                aau_log "PHASE COMPLETE detected — trigger created"
+                aau_jlog "info" "phase_complete" "\"info\":\"$PHASE_INFO\""
+                aau_notify "Phase完了: $(echo "$PHASE_INFO" | cut -d'|' -f1-2 | tr '|' ' ')"
+            fi
+        fi
+    fi
+fi
+
 aau_log "=== done ==="
 aau_jlog "info" "done"

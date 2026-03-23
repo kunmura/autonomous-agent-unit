@@ -30,13 +30,21 @@ prs = Presentation()
 prs.save('team/director/output/approval_request_phaseN.pptx')
 ```
 
-3. Slack files.upload API で .pptx ファイルをアップロードする:
+3. Slack files API (v2) で .pptx ファイルをアップロードする:
 ```bash
-curl -s -F file=@team/director/output/approval_request_phaseN.pptx \
-  -F channels=$SLACK_CHANNEL \
-  -F "initial_comment=フェーズN完了。承認をお願いします。" \
+FILE_PATH="team/director/output/approval_request_phaseN.pptx"
+FILE_SIZE=$(stat -f%z "$FILE_PATH" 2>/dev/null || stat -c%s "$FILE_PATH")
+RESP=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
   -H "Authorization: Bearer $SLACK_TOKEN" \
-  https://slack.com/api/files.upload
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -d "filename=$(basename $FILE_PATH)&length=$FILE_SIZE")
+UPLOAD_URL=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['upload_url'])")
+FILE_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
+curl -s -X POST "$UPLOAD_URL" -F "file=@$FILE_PATH"
+curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
+  -H "Authorization: Bearer $SLACK_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d "{\"files\":[{\"id\":\"$FILE_ID\",\"title\":\"承認資料\"}],\"channel_id\":\"$SLACK_CHANNEL\",\"initial_comment\":\"フェーズN完了。承認をお願いします。\"}"
 ```
 
 ## 状況

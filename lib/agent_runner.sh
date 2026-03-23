@@ -190,6 +190,49 @@ EXIT_CODE=$?
 cat "$OUTFILE" >> "$_AAU_LOG_FILE" 2>/dev/null
 rm -f "$OUTFILE"
 
+# ── Consecutive max-turns / timeout → auto-BLOCKED ─────────────────
+_MAX_TURNS_HIT=false
+if [[ "$EXIT_CODE" -eq 124 ]]; then
+    _MAX_TURNS_HIT=true
+elif [[ -f "$_AAU_LOG_FILE" ]] && tail -50 "$_AAU_LOG_FILE" 2>/dev/null | grep -qE "Reached max turns|max turns exceeded"; then
+    _MAX_TURNS_HIT=true
+fi
+
+if [[ "$_MAX_TURNS_HIT" == "true" ]]; then
+    MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
+    MT_COUNT=0
+    [[ -f "$MT_FILE" ]] && MT_COUNT=$(cat "$MT_FILE" 2>/dev/null || echo 0)
+    MT_COUNT=$(( MT_COUNT + 1 ))
+    echo "$MT_COUNT" > "$MT_FILE"
+
+    MT_THRESHOLD="${AAU_AGENT_MAX_TURNS_BLOCK_THRESHOLD:-2}"
+    if [[ "$MT_COUNT" -ge "$MT_THRESHOLD" ]]; then
+        # Auto-BLOCKED: mark first active task as BLOCKED
+        python3 - "$TASKS_FILE" << 'PYEOF'
+import sys, re
+tasks_file = sys.argv[1]
+with open(tasks_file) as f:
+    content = f.read()
+# Find first IN_PROGRESS or PENDING task
+for status in ["IN_PROGRESS", "PENDING"]:
+    pattern = rf'(^### TASK-\S+.*?)\[{status}\]'
+    m = re.search(pattern, content, re.MULTILINE)
+    if m:
+        old = m.group(0)
+        new = old.replace(f"[{status}]", "[BLOCKED — auto: max turns exceeded]")
+        content = content.replace(old, new, 1)
+        with open(tasks_file, "w") as f:
+            f.write(content)
+        print(f"BLOCKED: {old.strip()}")
+        break
+PYEOF
+        aau_log "AUTO-BLOCKED: $MEMBER — ${MT_COUNT} consecutive max turns"
+        aau_jlog "warn" "auto_blocked" "\"member\":\"$MEMBER\",\"consecutive\":$MT_COUNT"
+        aau_notify "[Auto-BLOCKED] ${MEMBER}: ${MT_COUNT}回連続max turns到達。タスクをBLOCKEDに変更しました。"
+        echo 0 > "$MT_FILE"
+    fi
+fi
+
 if [[ "$EXIT_CODE" -eq 124 ]]; then
     aau_log "session timed out after ${TIMEOUT}s"
     aau_jlog "error" "session_timeout" "\"member\":\"$MEMBER\""
@@ -199,6 +242,10 @@ elif [[ "$EXIT_CODE" -ne 0 ]]; then
 else
     aau_log "session succeeded"
     aau_jlog "info" "session_succeeded" "\"member\":\"$MEMBER\""
+
+    # Reset max-turns counter on success
+    MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
+    echo 0 > "$MT_FILE" 2>/dev/null
 
     # Reset rapid launch counter on success (not a loop)
     > "$COOLDOWN_LAUNCHES" 2>/dev/null
