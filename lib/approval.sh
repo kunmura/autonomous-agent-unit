@@ -92,22 +92,58 @@ try:
     if context:
         body.text += f"\n\n{context[:500]}"
 
-    # Slide 3: Deliverables
+    # Slide 3: Deliverables (with content summaries, not just filenames)
     slide = prs.slides.add_slide(prs.slide_layouts[1])
     slide.shapes.title.text = "成果物"
     body = slide.placeholders[1]
-    # List output files from team/*/output/
     outputs = []
     team_dir = project_root / "team"
     for member_dir in sorted(team_dir.iterdir()):
-        if not member_dir.is_dir():
+        if not member_dir.is_dir() or member_dir.name == "director":
             continue
         out_dir = member_dir / "output"
-        if out_dir.exists():
-            for f in sorted(out_dir.iterdir()):
-                if f.is_file() and not f.name.startswith('.'):
-                    outputs.append(f"{member_dir.name}/{f.name}")
-    body.text = "\n".join(outputs[-15:]) if outputs else "(成果物なし)"
+        if not out_dir.exists():
+            continue
+        for f in sorted(out_dir.iterdir()):
+            if not f.is_file() or f.name.startswith('.'):
+                continue
+            ext = f.suffix.lower()
+            size_kb = f.stat().st_size / 1024
+            if ext in ('.md', '.txt'):
+                # Include first few meaningful lines of text files
+                try:
+                    lines = f.read_text(errors='ignore').split('\n')
+                    # Skip headers and blank lines, get first 3 content lines
+                    content_lines = [l.strip() for l in lines if l.strip() and not l.startswith('#')][:3]
+                    desc = ' / '.join(content_lines)[:120]
+                    outputs.append(f"[{member_dir.name}] {f.name}\n  → {desc}")
+                except Exception:
+                    outputs.append(f"[{member_dir.name}] {f.name} ({size_kb:.0f}KB)")
+            elif ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
+                outputs.append(f"[{member_dir.name}] {f.name} (画像 {size_kb:.0f}KB)")
+            elif ext in ('.glb', '.gltf', '.obj', '.fbx'):
+                outputs.append(f"[{member_dir.name}] {f.name} (3Dモデル {size_kb/1024:.1f}MB)")
+            elif ext in ('.mp4', '.webm', '.gif'):
+                outputs.append(f"[{member_dir.name}] {f.name} (動画 {size_kb/1024:.1f}MB)")
+            elif ext in ('.pptx', '.xlsx', '.pdf'):
+                outputs.append(f"[{member_dir.name}] {f.name} (資料 {size_kb:.0f}KB)")
+            else:
+                outputs.append(f"[{member_dir.name}] {f.name} ({size_kb:.0f}KB)")
+    body.text = "\n".join(outputs[-20:]) if outputs else "(成果物なし)"
+
+    # Slide 3b: Status summary (from status.md and roadmap.md)
+    status_text = ""
+    status_file = team_dir / "director" / "status.md"
+    if status_file.exists():
+        try:
+            status_text = status_file.read_text()[:800]
+        except Exception:
+            pass
+    if status_text:
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = "プロジェクト状況"
+        body = slide.placeholders[1]
+        body.text = status_text
 
     # Slide 4: Approval request
     slide = prs.slides.add_slide(prs.slide_layouts[1])

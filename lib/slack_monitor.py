@@ -215,15 +215,17 @@ def detect_intent(text: str) -> str:
     if APPROVAL_ID_PATTERN.search(text):
         return INTENT_APPROVAL
 
-    # Natural language approval/rejection → check if any AP is PENDING
-    # "承認", "進めて", "OK" etc. auto-resolve the pending AP
-    if any(p in text_lower for p in APPROVAL_PHRASES) or text_lower.strip() in ("ok", "ｏｋ", "okay"):
-        approvals_path = _cfg["project_root"] / "team/director/approvals.md" if _cfg else None
-        if approvals_path and approvals_path.exists():
-            ap_content = approvals_path.read_text()
-            if "status: PENDING" in ap_content:
-                return INTENT_APPROVAL
-        return INTENT_TASK
+    # Natural language approval/rejection → only for SHORT messages (≤30 chars)
+    # Long messages containing "承認" are feedback, not approval intent.
+    # e.g. "承認" (2 chars) = approval, "承認依頼の資料には..." (20+ chars) = feedback
+    if len(text.strip()) <= 30:
+        if any(p in text_lower for p in APPROVAL_PHRASES) or text_lower.strip() in ("ok", "ｏｋ", "okay"):
+            approvals_path = _cfg["project_root"] / "team/director/approvals.md" if _cfg else None
+            if approvals_path and approvals_path.exists():
+                ap_content = approvals_path.read_text()
+                if "status: PENDING" in ap_content:
+                    return INTENT_APPROVAL
+            return INTENT_TASK
 
     # Short reactions (≤10 chars and contains reaction keyword)
     if len(text) <= 10 and any(p in text_lower for p in REACTION_PHRASES):
