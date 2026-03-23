@@ -166,43 +166,129 @@ PYEOF
     local ppt_result=$?
     if [[ -f "$ppt_path" ]]; then
         aau_log "approval PPT created: $ppt_path"
+    fi
 
-        # Upload PPT to Slack
-        if [[ -n "$SLACK_TOKEN" && -n "$SLACK_CHANNEL" ]]; then
-            local upload_msg="【承認依頼】${summary}
+    # Post approval to Slack: text summary + image uploads (no PPT dependency)
+    if [[ -n "$SLACK_TOKEN" && -n "$SLACK_CHANNEL" ]]; then
+        # Generate rich text summary for Slack (readable without local file access)
+        local slack_body
+        slack_body=$(python3 - "$AAU_PROJECT_ROOT" "$summary" << 'PYEOF'
+import sys
+from pathlib import Path
 
-承認する場合 → 「承認」「進めて」「OK」のいずれかをご返信ください
-却下する場合 → 「却下」と理由をお伝えください"
+project_root = Path(sys.argv[1])
+summary = sys.argv[2]
+team_dir = project_root / "team"
 
-            local file_size
-            file_size=$(stat -f%z "$ppt_path" 2>/dev/null || stat -c%s "$ppt_path" 2>/dev/null)
-            local filename
-            filename=$(basename "$ppt_path")
-            local resp
-            resp=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
-                -H "Authorization: Bearer ${SLACK_TOKEN}" \
-                -H 'Content-Type: application/x-www-form-urlencoded' \
-                -d "filename=${filename}&length=${file_size}")
-            local upload_url file_id
-            upload_url=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null)
-            file_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_id',''))" 2>/dev/null)
-            if [[ -n "$upload_url" && -n "$file_id" ]]; then
-                curl -s -X POST "$upload_url" -F "file=@${ppt_path}" > /dev/null 2>&1
-                curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
+parts = [f"*【承認依頼】{summary}*\n"]
+
+# Status summary
+status_file = team_dir / "director" / "status.md"
+if status_file.exists():
+    lines = status_file.read_text().split("\n")
+    # Extract key info (phase, active tasks, schedule)
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if any(kw in line for kw in ["フェーズ", "phase", "Phase", "状態", "タスク", "スケジュール", "TASK-"]):
+            parts.append(f"  {line}")
+    parts.append("")
+
+# Deliverables with content
+parts.append("*成果物:*")
+for member_dir in sorted(team_dir.iterdir()):
+    if not member_dir.is_dir() or member_dir.name == "director":
+        continue
+    out_dir = member_dir / "output"
+    if not out_dir.exists():
+        continue
+    member_outputs = []
+    for f in sorted(out_dir.iterdir()):
+        if not f.is_file() or f.name.startswith('.'):
+            continue
+        ext = f.suffix.lower()
+        size_kb = f.stat().st_size / 1024
+        if ext in ('.md', '.txt'):
+            try:
+                text = f.read_text(errors='ignore')
+                content_lines = [l.strip() for l in text.split('\n')
+                                if l.strip() and not l.startswith('#') and not l.startswith('---')][:3]
+                desc = ' '.join(content_lines)[:150]
+                member_outputs.append(f"  📄 {f.name}: {desc}")
+            except Exception:
+                member_outputs.append(f"  📄 {f.name} ({size_kb:.0f}KB)")
+        elif ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
+            member_outputs.append(f"  🖼 {f.name} ({size_kb:.0f}KB) — 画像は別途アップロード")
+        elif ext in ('.glb', '.gltf', '.obj', '.fbx'):
+            member_outputs.append(f"  🎮 {f.name} ({size_kb/1024:.1f}MB 3Dモデル)")
+        elif ext in ('.mp4', '.webm'):
+            member_outputs.append(f"  🎬 {f.name} ({size_kb/1024:.1f}MB 動画)")
+        elif ext in ('.pptx',):
+            pass  # Skip approval PPTs themselves
+        else:
+            member_outputs.append(f"  📎 {f.name} ({size_kb:.0f}KB)")
+    if member_outputs:
+        parts.append(f"[{member_dir.name}]")
+        parts.extend(member_outputs[-8:])
+
+parts.append("")
+parts.append("承認 → 「承認」「進めて」「OK」のいずれかをご返信ください")
+parts.append("却下 → 「却下」と理由をお伝えください")
+
+print("\n".join(parts))
+PYEOF
+        )
+
+        # Post text summary
+        python3 -c "
+import requests, json, sys
+token = sys.argv[1]
+channel = sys.argv[2]
+text = sys.argv[3]
+resp = requests.post('https://slack.com/api/chat.postMessage',
+    headers={'Authorization': f'Bearer {token}', 'Content-Type': 'application/json'},
+    json={'channel': channel, 'text': text})
+print('OK' if resp.json().get('ok') else f'ERROR: {resp.text}')
+" "$SLACK_TOKEN" "$SLACK_CHANNEL" "$slack_body" 2>/dev/null
+        aau_log "approval summary posted to Slack: $ap_id"
+
+        # Upload output images directly to Slack (max 5, most recent first)
+        local img_count=0
+        local img_max=5
+        for member in $(aau_team_members); do
+            [[ "$member" == "director" ]] && continue
+            local out_dir="$AAU_PROJECT_ROOT/team/$member/output"
+            [[ -d "$out_dir" ]] || continue
+            for img in $(ls -t "$out_dir"/*.png "$out_dir"/*.jpg "$out_dir"/*.gif 2>/dev/null); do
+                [[ "$img_count" -ge "$img_max" ]] && break 2
+                local img_size
+                img_size=$(stat -f%z "$img" 2>/dev/null || stat -c%s "$img" 2>/dev/null)
+                # Skip very large files (>10MB)
+                [[ "$img_size" -gt 10485760 ]] && continue
+                local img_name
+                img_name=$(basename "$img")
+                local img_resp
+                img_resp=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
                     -H "Authorization: Bearer ${SLACK_TOKEN}" \
-                    -H 'Content-Type: application/json' \
-                    -d "{\"files\":[{\"id\":\"${file_id}\",\"title\":\"${ap_id} 承認資料\"}],\"channel_id\":\"${SLACK_CHANNEL}\",\"initial_comment\":$(python3 -c "import json; print(json.dumps('''${upload_msg}'''))")}" > /dev/null 2>&1
-                aau_log "approval PPT uploaded to Slack: $ap_id"
-                aau_jlog "info" "approval_ppt_uploaded" "\"id\":\"$ap_id\""
-            else
-                aau_log "approval PPT upload failed (getUploadURLExternal): $resp"
-                aau_notify_flush "${ap_id}: ${summary} — PPT作成済みですがアップロードに失敗しました"
-            fi
-        else
-            aau_notify_flush "${ap_id}: ${summary} — PPT作成済み（Slack未設定のため手動確認してください）"
-        fi
+                    -H 'Content-Type: application/x-www-form-urlencoded' \
+                    -d "filename=${img_name}&length=${img_size}")
+                local img_url img_fid
+                img_url=$(echo "$img_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null)
+                img_fid=$(echo "$img_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_id',''))" 2>/dev/null)
+                if [[ -n "$img_url" && -n "$img_fid" ]]; then
+                    curl -s -X POST "$img_url" -F "file=@${img}" > /dev/null 2>&1
+                    curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
+                        -H "Authorization: Bearer ${SLACK_TOKEN}" \
+                        -H 'Content-Type: application/json' \
+                        -d "{\"files\":[{\"id\":\"${img_fid}\",\"title\":\"${img_name}\"}],\"channel_id\":\"${SLACK_CHANNEL}\"}" > /dev/null 2>&1
+                    img_count=$((img_count + 1))
+                    aau_log "approval image uploaded: $img_name"
+                fi
+            done
+        done
+        aau_jlog "info" "approval_posted" "\"id\":\"$ap_id\",\"images\":$img_count"
     else
-        aau_log "approval PPT generation failed for $ap_id"
-        aau_notify_flush "${ap_id}: ${summary} — PPT生成に失敗しましたが、承認依頼は作成済みです。「${ap_id} 承認」でSlackから承認できます。"
+        aau_notify_flush "${summary} — Slack未設定のため手動確認してください"
     fi
 }
