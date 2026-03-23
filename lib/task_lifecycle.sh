@@ -157,10 +157,9 @@ aau_idle_all() {
     local team_dir="$AAU_PROJECT_ROOT/team"
     local roadmap="$team_dir/director/roadmap.md"
 
-    # Approval gate check
+    # Approval gate check — silent wait (APPROVAL_REMINDER handles notifications)
     if _aau_approval_pending; then
-        aau_notify "承認待ちのため保留中です。プロデューサーの承認をお待ちしています。"
-        aau_log "idle_all: approval pending, notify only"
+        aau_log "idle_all: approval pending, silent wait (reminder handles notifications)"
         aau_jlog "info" "idle_all_approval_pending"
         return 0
     fi

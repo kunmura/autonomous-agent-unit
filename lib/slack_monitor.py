@@ -215,17 +215,24 @@ def detect_intent(text: str) -> str:
     if APPROVAL_ID_PATTERN.search(text):
         return INTENT_APPROVAL
 
-    # Natural language approval/rejection → only for SHORT messages (≤30 chars)
-    # Long messages containing "承認" are feedback, not approval intent.
-    # e.g. "承認" (2 chars) = approval, "承認依頼の資料には..." (20+ chars) = feedback
-    if len(text.strip()) <= 30:
-        if any(p in text_lower for p in APPROVAL_PHRASES) or text_lower.strip() in ("ok", "ｏｋ", "okay"):
-            approvals_path = _cfg["project_root"] / "team/director/approvals.md" if _cfg else None
-            if approvals_path and approvals_path.exists():
-                ap_content = approvals_path.read_text()
-                if "status: PENDING" in ap_content:
-                    return INTENT_APPROVAL
-            return INTENT_TASK
+    # Natural language approval/rejection
+    # Rule: message STARTS WITH approval keyword → approval (any length)
+    #        "承認するが、条件として〜" = approval with conditions
+    #        "承認依頼の資料には〜" = NOT approval (talking about approval process)
+    # Rule: short message (≤30 chars) containing keyword → approval
+    _text_stripped = text.strip()
+    _starts_with_approval = any(_text_stripped.startswith(p) for p in ["承認", "却下", "進めて"])
+    _starts_with_meta = any(_text_stripped.startswith(p) for p in ["承認依頼", "承認資料", "承認の"])
+    _is_short_approval = len(_text_stripped) <= 30 and (
+        any(p in text_lower for p in APPROVAL_PHRASES) or text_lower.strip() in ("ok", "ｏｋ", "okay"))
+
+    if (_starts_with_approval and not _starts_with_meta) or _is_short_approval:
+        approvals_path = _cfg["project_root"] / "team/director/approvals.md" if _cfg else None
+        if approvals_path and approvals_path.exists():
+            ap_content = approvals_path.read_text()
+            if "status: PENDING" in ap_content:
+                return INTENT_APPROVAL
+        return INTENT_TASK
 
     # Short reactions (≤10 chars and contains reaction keyword)
     if len(text) <= 10 and any(p in text_lower for p in REACTION_PHRASES):
