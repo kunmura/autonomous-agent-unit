@@ -58,7 +58,7 @@ EOF
     aau_jlog "info" "approval_created" "\"id\":\"$ap_id\",\"summary\":\"${summary:0:60}\""
 
     # PPT generation mode: "director" (Claude session) or "auto" (zero-token fallback)
-    local ppt_mode="${AAU_APPROVAL_PPT_MODE:-auto}"
+    local ppt_mode="${AAU_DIRECTOR_APPROVAL_PPT_MODE:-${AAU_APPROVAL_PPT_MODE:-auto}}"
     if [[ "$ppt_mode" == "director" ]]; then
         # Director Claude session will create the PPT — just notify
         aau_log "approval PPT deferred to director session: $ap_id"
