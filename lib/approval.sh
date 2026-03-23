@@ -253,6 +253,30 @@ print('OK' if resp.json().get('ok') else f'ERROR: {resp.text}')
 " "$SLACK_TOKEN" "$SLACK_CHANNEL" "$slack_body" 2>/dev/null
         aau_log "approval summary posted to Slack: $ap_id"
 
+        # Upload PPT to Slack
+        if [[ -f "$ppt_path" ]]; then
+            local ppt_size
+            ppt_size=$(stat -f%z "$ppt_path" 2>/dev/null || stat -c%s "$ppt_path" 2>/dev/null)
+            local ppt_name
+            ppt_name=$(basename "$ppt_path")
+            local ppt_resp
+            ppt_resp=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
+                -H "Authorization: Bearer ${SLACK_TOKEN}" \
+                -H 'Content-Type: application/x-www-form-urlencoded' \
+                -d "filename=${ppt_name}&length=${ppt_size}")
+            local ppt_url ppt_fid
+            ppt_url=$(echo "$ppt_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null)
+            ppt_fid=$(echo "$ppt_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_id',''))" 2>/dev/null)
+            if [[ -n "$ppt_url" && -n "$ppt_fid" ]]; then
+                curl -s -X POST "$ppt_url" -F "file=@${ppt_path}" > /dev/null 2>&1
+                curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
+                    -H "Authorization: Bearer ${SLACK_TOKEN}" \
+                    -H 'Content-Type: application/json' \
+                    -d "{\"files\":[{\"id\":\"${ppt_fid}\",\"title\":\"承認資料\"}],\"channel_id\":\"${SLACK_CHANNEL}\"}" > /dev/null 2>&1
+                aau_log "approval PPT uploaded to Slack: $ap_id"
+            fi
+        fi
+
         # Upload output images directly to Slack (max 5, most recent first)
         local img_count=0
         local img_max=5
