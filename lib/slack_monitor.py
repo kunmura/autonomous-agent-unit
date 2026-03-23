@@ -240,8 +240,9 @@ def detect_intent(text: str) -> str:
     if len(text) <= 3 and not has_text_char:
         return INTENT_REACTION
 
-    # Status query
-    if any(p in text for p in STATUS_QUERY_PHRASES):
+    # Status query — only for short messages (≤40 chars) to avoid false matches
+    # e.g. "状況" (2 chars) = status query, "管理監督状況から脱し..." (long) = task
+    if len(text.strip()) <= 40 and any(p in text for p in STATUS_QUERY_PHRASES):
         return INTENT_STATUS
 
     # Record trigger (configurable keyword)
