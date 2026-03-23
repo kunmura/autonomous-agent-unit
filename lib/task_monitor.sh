@@ -128,6 +128,7 @@ for MEMBER in $(aau_team_members); do
     PENDING=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
     INPROGRESS=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
     NEEDS_EVIDENCE=$(grep -cE '^### TASK-.*\[NEEDS_EVIDENCE\]' "$TASKS_FILE" 2>/dev/null || true)
+    REVIEW_REQUIRED=$(grep -cE '^### TASK-.*\[REVIEW_REQUIRED\]' "$TASKS_FILE" 2>/dev/null || true)
     BLOCKED=$(grep -cE '^### TASK-.*\[BLOCKED\]' "$TASKS_FILE" 2>/dev/null || true)
 
     # Exclude self-study/learning tasks from pending count (prevent unnecessary agent launch)
@@ -136,6 +137,10 @@ for MEMBER in $(aau_team_members); do
     if [[ "$BLOCKED" -gt 0 ]]; then
         aau_log "$MEMBER: $BLOCKED BLOCKED task(s) detected"
         aau_jlog "warn" "blocked_detected" "\"member\":\"$MEMBER\",\"blocked\":$BLOCKED"
+    fi
+    if [[ "$REVIEW_REQUIRED" -gt 0 ]]; then
+        aau_log "$MEMBER: $REVIEW_REQUIRED REVIEW_REQUIRED task(s) — needs director intervention"
+        aau_jlog "warn" "review_required" "\"member\":\"$MEMBER\",\"count\":$REVIEW_REQUIRED"
     fi
 
     if [[ "$REAL_PENDING" -gt 0 || "$INPROGRESS" -gt 0 || "$NEEDS_EVIDENCE" -gt 0 ]]; then

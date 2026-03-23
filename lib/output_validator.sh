@@ -46,6 +46,20 @@ while IFS= read -r line; do
     fi
 
     FILE_SIZE=$(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0)
+    FILE_EXT="${OUTPUT_FILE##*.}"
+    FILE_EXT_LOWER=$(echo "$FILE_EXT" | tr '[:upper:]' '[:lower:]')
+
+    # --- Binary files (images, pptx, etc.) → size check only ---
+    case "$FILE_EXT_LOWER" in
+        png|jpg|jpeg|gif|mp4|webm|pptx|xlsx|pdf|zip|wav|mp3|svg|webp|bmp)
+            if [[ "$FILE_SIZE" -lt 100 ]]; then
+                VALIDATION_ISSUES="${VALIDATION_ISSUES}\n[FAIL] ${TASK_ID}: バイナリファイルが小さすぎます (${FILE_SIZE} bytes)"
+                FAILED=$((FAILED + 1))
+            fi
+            continue
+            ;;
+    esac
+
     FILE_LINES=$(wc -l < "$OUTPUT_FILE" 2>/dev/null || echo 0)
 
     # --- Check 2: File is not empty/too short ---
@@ -140,10 +154,24 @@ if [[ "$FAILED" -gt 0 ]]; then
         # Re-run the failure checks
         if [[ -z "$OUTPUT_FILE" || ! -f "$OUTPUT_FILE" ]]; then
             SHOULD_REVERT=1
-        elif [[ $(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0) -lt 200 ]]; then
-            SHOULD_REVERT=1
-        elif ! grep -qiE '(情報源|信頼性|出典|参考|Sources|References|Evidence)' "$OUTPUT_FILE" 2>/dev/null; then
-            SHOULD_REVERT=1
+        else
+            local _ext="${OUTPUT_FILE##*.}"
+            local _ext_lower=$(echo "$_ext" | tr '[:upper:]' '[:lower:]')
+            case "$_ext_lower" in
+                png|jpg|jpeg|gif|mp4|webm|pptx|xlsx|pdf|zip|wav|mp3|svg|webp|bmp)
+                    # Binary: only check minimum size
+                    if [[ $(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0) -lt 100 ]]; then
+                        SHOULD_REVERT=1
+                    fi
+                    ;;
+                *)
+                    if [[ $(wc -c < "$OUTPUT_FILE" 2>/dev/null || echo 0) -lt 200 ]]; then
+                        SHOULD_REVERT=1
+                    elif ! grep -qiE '(情報源|信頼性|出典|参考|Sources|References|Evidence)' "$OUTPUT_FILE" 2>/dev/null; then
+                        SHOULD_REVERT=1
+                    fi
+                    ;;
+            esac
         fi
 
         if [[ "$SHOULD_REVERT" -eq 1 ]]; then
