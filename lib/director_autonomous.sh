@@ -105,14 +105,22 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
     fi
 fi
 
-# --- 2. REPORT_DUE ---
-if [[ "$ACTION" != "MILESTONE_REPORT" && "$ACTION" != "DONE_FOLLOWUP" ]] && [[ -f "$REPORT_MARKER" ]]; then
+# --- 2. REPORT_DUE (blocked during approval pending — APPROVAL_REMINDER handles it) ---
+_APPROVAL_PENDING=false
+if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+    _APPROVAL_PENDING=true
+fi
+if [[ "$_APPROVAL_PENDING" == "true" && "$ACTION" == "NO_ACTION" ]]; then
+    aau_log "approval pending — skipping REPORT_DUE (APPROVAL_REMINDER handles notifications)"
+    aau_jlog "info" "report_skip_approval"
+fi
+if [[ "$_APPROVAL_PENDING" == "false" && "$ACTION" != "MILESTONE_REPORT" && "$ACTION" != "DONE_FOLLOWUP" ]] && [[ -f "$REPORT_MARKER" ]]; then
     LAST_REPORT=$(aau_file_mtime "$REPORT_MARKER")
     REPORT_AGE=$(( NOW - LAST_REPORT ))
 else
     REPORT_AGE=$((REPORT_INTERVAL + 1))
 fi
-if [[ "$ACTION" != "MILESTONE_REPORT" && "$ACTION" != "DONE_FOLLOWUP" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]; then
+if [[ "$_APPROVAL_PENDING" == "false" && "$ACTION" != "MILESTONE_REPORT" && "$ACTION" != "DONE_FOLLOWUP" && "$REPORT_AGE" -gt "$REPORT_INTERVAL" ]]; then
     CURRENT_STATE=""
     for MEMBER in $(aau_team_members); do
         TF="$TEAM_DIR/$MEMBER/tasks.md"
