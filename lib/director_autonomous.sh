@@ -107,7 +107,7 @@ fi
 
 # --- 2. REPORT_DUE (blocked during approval pending — APPROVAL_REMINDER handles it) ---
 _APPROVAL_PENDING=false
-if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+if [[ -f "$STATUS_FILE" ]] && grep -q '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null; then
     _APPROVAL_PENDING=true
 fi
 if [[ "$_APPROVAL_PENDING" == "true" && "$ACTION" == "NO_ACTION" ]]; then
@@ -176,8 +176,8 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
 fi
 
 # --- 4. APPROVAL_REMINDER ---
-if [[ "$ACTION" == "NO_ACTION" && -f "$STATUS_FILE" ]]; then
-    if grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+if [[ "$ACTION" == "NO_ACTION" ]]; then
+    if [[ -f "$TEAM_DIR/director/approvals.md" ]] && grep -q '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null; then
         # Check if reminder is due (every APPROVAL_REMINDER_INTERVAL)
         SEND_REMINDER=false
         if [[ -f "$APPROVAL_REMINDER_MARKER" ]]; then
@@ -203,7 +203,7 @@ fi
 # --- 5. IDLE_ALL (blocked by approval gate) ---
 if [[ "$ACTION" == "NO_ACTION" ]]; then
     # Approval gate: if status.md has approval pending, do not enter IDLE_ALL
-    if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
+    if [[ -f "$STATUS_FILE" ]] && grep -q '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null; then
         aau_log "approval pending in status.md, blocking IDLE_ALL"
         aau_jlog "info" "approval_gate_block"
         ACTION="NO_ACTION"
@@ -302,7 +302,9 @@ fi
 
 # ─── APPROVAL_REMINDER → notify only, no Claude (zero-token) ───────────
 if [[ "$ACTION" == "APPROVAL_REMINDER" ]]; then
-    aau_notify_flush "承認待ちのため保留中です。プロデューサーの承認をお待ちしています。"
+    # Include pending AP-IDs in reminder
+    _PENDING_APS=$(grep -B1 '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null | grep '^## AP-' | sed 's/^## //' || true)
+    aau_notify_flush "承認待ちのため保留中です。以下の承認をお待ちしています:\n${_PENDING_APS}\n\n「AP-XXX 承認」または「AP-XXX 却下」でSlackからご回答ください。"
     touch "$APPROVAL_REMINDER_MARKER"
     aau_log "=== approval reminder sent, exit ==="
     aau_jlog "info" "approval_reminder_sent"

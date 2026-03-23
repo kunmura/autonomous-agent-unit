@@ -5,10 +5,10 @@
 
 # Requires: common.sh already sourced
 
-# Check if approval gate is active (returns 0 if pending, 1 if clear)
+# Check if any approval is pending (returns 0 if pending, 1 if clear)
 _aau_approval_pending() {
-    local status_file="$AAU_PROJECT_ROOT/team/director/status.md"
-    [[ -f "$status_file" ]] && grep -qiE '承認待ち|approval pending' "$status_file" 2>/dev/null
+    local approvals_file="$AAU_PROJECT_ROOT/team/director/approvals.md"
+    [[ -f "$approvals_file" ]] && grep -q '^status: PENDING' "$approvals_file" 2>/dev/null
 }
 
 # ─── DONE_FOLLOWUP (zero-token) ─────────────────────────────────────
@@ -235,9 +235,13 @@ PYEOF
     )
 
     if [[ "$result" == "SPRINT_COMPLETE" ]]; then
-        # Mark sprint as done, set approval pending
-        aau_notify "現スプリント完了。プロデューサーの承認をお待ちしています。"
-        aau_log "idle_all: sprint complete, awaiting approval"
+        # Create formal approval request with PPT
+        source "$SCRIPT_DIR/approval.sh"
+        source "$SCRIPT_DIR/task_summarizer.sh"
+        local _roadmap_info
+        _roadmap_info=$(aau_roadmap_summary 2>/dev/null)
+        aau_create_approval "スプリント完了 — 次フェーズ移行" "${_roadmap_info}"
+        aau_log "idle_all: sprint complete, approval request created"
         aau_jlog "info" "idle_all_sprint_complete"
         return 0
     fi

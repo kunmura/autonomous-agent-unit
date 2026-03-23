@@ -115,6 +115,9 @@ INTENT_REACTION = "reaction"  # Short reaction/emoji → skip
 INTENT_RECORD   = "record"    # Recording request → trigger file (configurable)
 INTENT_TASK     = "task"      # Instruction/request/question → requires Claude
 INTENT_EMERGENCY = "emergency"  # Emergency override → force active hours
+INTENT_APPROVAL = "approval"    # AP-XXX approval/rejection → update approvals.md
+
+APPROVAL_ID_PATTERN = re.compile(r'AP-(\d+)\s*(承認|却下|approve|reject)', re.IGNORECASE)
 
 STATUS_QUERY_PHRASES = [
     "システム状態", "システムの状態", "状態教えて", "状況教えて", "状況",
@@ -207,6 +210,10 @@ def detect_intent(text: str) -> str:
     # Emergency override — highest priority
     if any(p in text_lower for p in EMERGENCY_PHRASES):
         return INTENT_EMERGENCY
+
+    # Approval ID pattern: "AP-001 承認" or "AP-002 却下"
+    if APPROVAL_ID_PATTERN.search(text):
+        return INTENT_APPROVAL
 
     # Approval phrases → always TASK (never classify as REACTION)
     if any(p in text_lower for p in APPROVAL_PHRASES):
@@ -516,6 +523,52 @@ def check_slack(state: dict) -> str:
             except Exception as e:
                 log(f"  → emergency reply error: {e}")
             new_latest_ts = ts
+            continue
+
+        # APPROVAL → update approvals.md (zero-token, no Claude)
+        if intent == INTENT_APPROVAL:
+            match = APPROVAL_ID_PATTERN.search(text)
+            if match:
+                ap_id = f"AP-{match.group(1)}"
+                ap_action_word = match.group(2)
+                ap_status = "APPROVED" if "承認" in ap_action_word or "approve" in ap_action_word.lower() else "REJECTED"
+                approvals_path = _cfg["project_root"] / "team/director/approvals.md"
+                if approvals_path.exists():
+                    content = approvals_path.read_text()
+                    # Update status for matching AP-ID
+                    updated = re.sub(
+                        rf'(## {re.escape(ap_id)} .+\n)status: PENDING',
+                        rf'\1status: {ap_status}',
+                        content
+                    )
+                    if ap_status == "APPROVED":
+                        updated = re.sub(
+                            rf'(## {re.escape(ap_id)} .+\nstatus: APPROVED\ncreated: .+)',
+                            rf'\1\napproved: {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+                            updated
+                        )
+                    approvals_path.write_text(updated)
+                    log(f"  → {ap_id} {ap_status}")
+                    jlog("info", "approval_decision", id=ap_id, status=ap_status)
+                    status_word = "承認しました" if ap_status == "APPROVED" else "却下しました"
+                    try:
+                        slack_post(f"[by Bot] {ap_id} {status_word}。")
+                    except Exception:
+                        pass
+                else:
+                    log(f"  → approvals.md not found, skipping {ap_id}")
+            new_latest_ts = ts
+            # Also write to inbox so director knows
+            entry = f"""
+## [{dt}] Slack: Producer — 承認回答
+> {text}
+
+**承認ID**: {ap_id if match else "?"}
+**結果**: {ap_status if match else "?"}
+ステータス: UNREAD
+
+"""
+            append_inbox(entry)
             continue
 
         # REACTION → skip
