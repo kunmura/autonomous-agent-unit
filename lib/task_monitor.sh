@@ -62,18 +62,14 @@ PYEOF
     fi
 done
 
-# ── Approval gate: if status.md has "承認待ち", block ALL triggers ──
+# ── Approval gate (scoped) ──────────────────────────────────────────────
+# Approval pending only blocks NEW task creation (enforced in task_lifecycle.sh
+# and director templates). Existing PENDING tasks should still be executed by agents.
 STATUS_FILE="$TEAM_DIR/director/status.md"
 if [[ -f "$STATUS_FILE" ]] && grep -qiE '承認待ち|approval pending' "$STATUS_FILE" 2>/dev/null; then
-    aau_log "APPROVAL GATE: status.md has approval pending — blocking all triggers"
-    aau_jlog "info" "approval_gate_block"
-    # Clear all existing triggers
-    for _m in $(aau_team_members); do
-        rm -f "${AAU_TMP}/${AAU_PREFIX}_trigger_${_m}"
-    done
-    aau_log "=== done (approval gate) ==="
-    aau_jlog "info" "done" "\"reason\":\"approval_gate\""
-    exit 0
+    aau_log "APPROVAL GATE: active (new task creation blocked, existing tasks allowed)"
+    aau_jlog "info" "approval_gate_active"
+    # Do NOT clear triggers — agents should process existing PENDING tasks
 fi
 
 # ── promised.md PENDING → auto-convert (DISABLED: causes junk task spam) ──

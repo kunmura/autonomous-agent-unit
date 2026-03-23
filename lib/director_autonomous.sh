@@ -302,10 +302,58 @@ fi
 
 # ─── APPROVAL_REMINDER → notify only, no Claude (zero-token) ───────────
 if [[ "$ACTION" == "APPROVAL_REMINDER" ]]; then
-    aau_notify "承認待ちのため保留中です。プロデューサーの承認をお待ちしています。/ Approval pending — awaiting producer approval."
+    aau_notify_flush "承認待ちのため保留中です。プロデューサーの承認をお待ちしています。"
     touch "$APPROVAL_REMINDER_MARKER"
     aau_log "=== approval reminder sent, exit ==="
     aau_jlog "info" "approval_reminder_sent"
+    exit 0
+fi
+
+# ─── DONE_FOLLOWUP → zero-token ──────────────────────────────────────────
+if [[ "$ACTION" == "DONE_FOLLOWUP" ]]; then
+    cd "$AAU_PROJECT_ROOT"
+    source "$SCRIPT_DIR/task_lifecycle.sh"
+    aau_followup_done
+    # Update DONE_SEED
+    DONE_NOW=""
+    for _M in $(aau_team_members); do
+        _TF="$TEAM_DIR/$_M/tasks.md"
+        [[ -f "$_TF" ]] || continue
+        _MD=$(grep -cE '^### TASK-.*\[DONE\]' "$_TF" 2>/dev/null || true)
+        [[ "$_MD" -gt 0 ]] && DONE_NOW="${DONE_NOW}${_M}:${_MD} "
+    done
+    echo "$DONE_NOW" | aau_md5 > "$DONE_SEED"
+    aau_log "=== done (done_followup_zero_token) ==="
+    aau_jlog "info" "done" "\"action\":\"DONE_FOLLOWUP\",\"method\":\"zero_token\""
+    exit 0
+fi
+
+# ─── REPORT_DUE → zero-token ────────────────────────────────────────────
+if [[ "$ACTION" == "REPORT_DUE" ]]; then
+    cd "$AAU_PROJECT_ROOT"
+    source "$SCRIPT_DIR/task_summarizer.sh"
+    REPORT_MSG="[進捗報告]"
+    # Roadmap progress
+    _RM=$(aau_roadmap_summary 2>/dev/null)
+    [[ -n "$_RM" && "$_RM" != "(ロードマップなし)" ]] && REPORT_MSG="${REPORT_MSG}\n${_RM}"
+    # Task summary
+    _TS=$(aau_task_summary_compact 1 2>/dev/null)
+    [[ -n "$_TS" && "$_TS" != *"タスクなし"* ]] && REPORT_MSG="${REPORT_MSG}\n${_TS}"
+    aau_notify "$(echo -e "$REPORT_MSG")"
+    touch "$REPORT_MARKER"
+    echo "$CURRENT_STATE_HASH" > "$REPORT_STATE_SEED"
+    aau_log "=== done (report_due_zero_token) ==="
+    aau_jlog "info" "done" "\"action\":\"REPORT_DUE\",\"method\":\"zero_token\""
+    exit 0
+fi
+
+# ─── IDLE_ALL → zero-token ──────────────────────────────────────────────
+if [[ "$ACTION" == "IDLE_ALL" ]]; then
+    cd "$AAU_PROJECT_ROOT"
+    source "$SCRIPT_DIR/task_lifecycle.sh"
+    aau_idle_all
+    aau_log "=== done (idle_all_zero_token) ==="
+    aau_jlog "info" "done" "\"action\":\"IDLE_ALL\",\"method\":\"zero_token\""
     exit 0
 fi
 

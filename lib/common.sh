@@ -116,35 +116,40 @@ aau_run_with_timeout() {
 
 aau_notify() {
     local message="$1"
-    local agent_name="${2:-}"  # Optional: agent name for [by Agent] prefix
+    local agent_name="${2:-}"
+    local queue="${AAU_TMP}/${AAU_PREFIX}_slack_queue"
+    local full_msg="$message"
+    [[ -n "$agent_name" ]] && full_msg="[by ${agent_name}] ${message}"
+    # Write to queue — slack_monitor will consume, dedup, and post
+    echo "$(date +%s)|${full_msg}" >> "$queue" 2>/dev/null
+    aau_log "notification queued: ${full_msg:0:80}"
+}
+
+# Direct posting, bypasses queue (for emergencies, approval reminders)
+aau_notify_flush() {
+    local message="$1"
+    local agent_name="${2:-}"
     local plugin="${AAU_NOTIFICATION_PLUGIN:-none}"
+    local full_msg="$message"
+    [[ -n "$agent_name" ]] && full_msg="[by ${agent_name}] ${message}"
 
     case "$plugin" in
         slack)
             local plugin_script="$AAU_ROOT/plugins/slack/notify.sh"
             if [[ -f "$plugin_script" ]]; then
                 source "$plugin_script"
-                aau_plugin_notify "$message" "$agent_name"
+                aau_plugin_notify "$full_msg"
             fi
             ;;
-        discord)
-            local plugin_script="$AAU_ROOT/plugins/discord/notify.sh"
+        discord|webhook)
+            local plugin_script="$AAU_ROOT/plugins/${plugin}/notify.sh"
             if [[ -f "$plugin_script" ]]; then
                 source "$plugin_script"
-                aau_plugin_notify "$message" "$agent_name"
-            fi
-            ;;
-        webhook)
-            local plugin_script="$AAU_ROOT/plugins/webhook/notify.sh"
-            if [[ -f "$plugin_script" ]]; then
-                source "$plugin_script"
-                aau_plugin_notify "$message" "$agent_name"
+                aau_plugin_notify "$full_msg"
             fi
             ;;
         none)
-            local prefix=""
-            [[ -n "$agent_name" ]] && prefix="[by ${agent_name}] "
-            aau_log "notification (no plugin): ${prefix}$message"
+            aau_log "notification (no plugin): $full_msg"
             ;;
     esac
 }

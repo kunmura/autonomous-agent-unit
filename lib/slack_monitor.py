@@ -8,6 +8,7 @@ Usage:
     python3 slack_monitor.py /path/to/project
 """
 
+import hashlib
 import json
 import os
 import re
@@ -555,6 +556,23 @@ def check_slack(state: dict) -> str:
             new_latest_ts = ts
             continue
 
+        # Auto-approval detection: clear gate immediately (zero-token)
+        text_lower_check = text.lower().strip()
+        if any(p in text_lower_check for p in APPROVAL_PHRASES) or text_lower_check in ("ok", "okay", "良い"):
+            status_path = _cfg["project_root"] / "team/director/status.md"
+            if status_path.exists():
+                st_content = status_path.read_text()
+                if "承認待ち" in st_content or "approval pending" in st_content.lower():
+                    new_st = st_content.replace("承認待ち", "承認済み")
+                    new_st = re.sub(r'(?i)approval pending', 'approved', new_st)
+                    status_path.write_text(new_st)
+                    log("  → AUTO-APPROVAL: cleared gate in status.md")
+                    jlog("info", "auto_approval_cleared")
+                    try:
+                        slack_post("[by Bot] 承認確認。ゲート解除しました。作業を再開します。")
+                    except Exception:
+                        pass
+
         # TASK → classify → inbox → director-responder handles
         classification = ollama_classify(text)
         summary = classification.get("summary", text[:50])
@@ -675,6 +693,67 @@ def scan_bot_promises(state: dict):
                 break
 
 
+# ── Slack通知キュー消費 ────────────────────────────────────────────────
+def flush_slack_queue():
+    """Read queued notifications, dedup by content hash, post with min interval."""
+    prefix = _cfg.get("prefix", "aau")
+    queue_path = Path(f"/tmp/{prefix}_slack_queue")
+    if not queue_path.exists():
+        return
+
+    posted_hashes_path = Path(f"/tmp/{prefix}_slack_posted_hashes")
+    min_interval = 600  # 10 minutes between similar messages
+
+    # Read and clear queue atomically
+    try:
+        lines = queue_path.read_text().splitlines()
+        queue_path.unlink()
+    except Exception:
+        return
+
+    # Load recent post hashes
+    recent_hashes = {}
+    if posted_hashes_path.exists():
+        try:
+            for line in posted_hashes_path.read_text().splitlines():
+                parts = line.split("|", 1)
+                if len(parts) == 2:
+                    recent_hashes[parts[1]] = int(parts[0])
+        except Exception:
+            pass
+
+    now = int(datetime.now().timestamp())
+    for line in lines:
+        parts = line.split("|", 1)
+        if len(parts) != 2:
+            continue
+        _ts, msg = parts[0], parts[1]
+        content_hash = hashlib.md5(msg[:100].encode()).hexdigest()[:12]
+
+        # Dedup: skip if same hash posted within min_interval
+        if content_hash in recent_hashes:
+            if now - recent_hashes[content_hash] < min_interval:
+                log(f"  queue dedup: skipped ({msg[:40]})")
+                continue
+
+        try:
+            slack_post(msg)
+            recent_hashes[content_hash] = now
+            log(f"  queue posted: {msg[:60]}")
+        except Exception as e:
+            log(f"  queue post error: {e}")
+
+    # Save recent hashes (keep last 24h only)
+    cutoff = now - 86400
+    try:
+        with open(posted_hashes_path, "w") as f:
+            for h, t in recent_hashes.items():
+                if t > cutoff:
+                    f.write(f"{t}|{h}\n")
+    except Exception:
+        pass
+
+
 # ── メイン ────────────────────────────────────────────────────────────
 def _is_quiet_hours(cfg: dict) -> bool:
     """Check if current time is within quiet hours using centralized schedule."""
@@ -781,6 +860,9 @@ def main():
 
         file_updates = check_team_files(state)
         state.update(file_updates)
+
+    # Flush Slack notification queue (dedup, rate-limited)
+    flush_slack_queue()
 
     write_state(state)
     log("=== done ===")
