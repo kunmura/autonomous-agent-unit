@@ -215,11 +215,14 @@ def detect_intent(text: str) -> str:
     if APPROVAL_ID_PATTERN.search(text):
         return INTENT_APPROVAL
 
-    # Approval phrases → always TASK (never classify as REACTION)
-    if any(p in text_lower for p in APPROVAL_PHRASES):
-        return INTENT_TASK
-    # Bare "OK"/"ok" → also TASK (likely approval)
-    if text_lower.strip() in ("ok", "ｏｋ", "okay"):
+    # Natural language approval/rejection → check if any AP is PENDING
+    # "承認", "進めて", "OK" etc. auto-resolve the pending AP
+    if any(p in text_lower for p in APPROVAL_PHRASES) or text_lower.strip() in ("ok", "ｏｋ", "okay"):
+        approvals_path = _cfg["project_root"] / "team/director/approvals.md" if _cfg else None
+        if approvals_path and approvals_path.exists():
+            ap_content = approvals_path.read_text()
+            if "status: PENDING" in ap_content:
+                return INTENT_APPROVAL
         return INTENT_TASK
 
     # Short reactions (≤10 chars and contains reaction keyword)
@@ -528,43 +531,62 @@ def check_slack(state: dict) -> str:
         # APPROVAL → update approvals.md (zero-token, no Claude)
         if intent == INTENT_APPROVAL:
             match = APPROVAL_ID_PATTERN.search(text)
+            approvals_path = _cfg["project_root"] / "team/director/approvals.md"
+            ap_id = None
+            ap_status = None
+
             if match:
+                # Explicit: "AP-001 承認"
                 ap_id = f"AP-{match.group(1)}"
                 ap_action_word = match.group(2)
                 ap_status = "APPROVED" if "承認" in ap_action_word or "approve" in ap_action_word.lower() else "REJECTED"
-                approvals_path = _cfg["project_root"] / "team/director/approvals.md"
+            else:
+                # Natural language: "承認", "進めて", "OK" → resolve first PENDING AP
+                text_lower_ap = text.lower().strip()
+                is_reject = any(w in text_lower_ap for w in ["却下", "reject", "やめ", "だめ", "ダメ", "やり直"])
+                ap_status = "REJECTED" if is_reject else "APPROVED"
                 if approvals_path.exists():
-                    content = approvals_path.read_text()
-                    # Update status for matching AP-ID
+                    ap_content = approvals_path.read_text()
+                    pending_match = re.search(r'## (AP-\d+) .+\nstatus: PENDING', ap_content)
+                    if pending_match:
+                        ap_id = pending_match.group(1)
+
+            if ap_id and approvals_path.exists():
+                content = approvals_path.read_text()
+                updated = re.sub(
+                    rf'(## {re.escape(ap_id)} .+\n)status: PENDING',
+                    rf'\1status: {ap_status}',
+                    content
+                )
+                if ap_status == "APPROVED":
                     updated = re.sub(
-                        rf'(## {re.escape(ap_id)} .+\n)status: PENDING',
-                        rf'\1status: {ap_status}',
-                        content
+                        rf'(## {re.escape(ap_id)} .+\nstatus: APPROVED\ncreated: .+)',
+                        rf'\1\napproved: {datetime.now().strftime("%Y-%m-%d %H:%M")}',
+                        updated
                     )
-                    if ap_status == "APPROVED":
-                        updated = re.sub(
-                            rf'(## {re.escape(ap_id)} .+\nstatus: APPROVED\ncreated: .+)',
-                            rf'\1\napproved: {datetime.now().strftime("%Y-%m-%d %H:%M")}',
-                            updated
-                        )
-                    approvals_path.write_text(updated)
-                    log(f"  → {ap_id} {ap_status}")
-                    jlog("info", "approval_decision", id=ap_id, status=ap_status)
-                    status_word = "承認しました" if ap_status == "APPROVED" else "却下しました"
-                    try:
-                        slack_post(f"[by Bot] {ap_id} {status_word}。")
-                    except Exception:
-                        pass
-                else:
-                    log(f"  → approvals.md not found, skipping {ap_id}")
+                approvals_path.write_text(updated)
+                log(f"  → {ap_id} {ap_status}")
+                jlog("info", "approval_decision", id=ap_id, status=ap_status)
+                status_word = "承認しました" if ap_status == "APPROVED" else "却下しました"
+                # Extract AP summary for human-readable message
+                summary_match = re.search(rf'## {re.escape(ap_id)} (.+)', content)
+                ap_summary = summary_match.group(1) if summary_match else ""
+                try:
+                    slack_post(f"[by Bot] {ap_summary}を{status_word} 作業を再開します。")
+                except Exception:
+                    pass
+            elif not ap_id:
+                log("  → no PENDING approval found for natural language approval")
+            else:
+                log(f"  → approvals.md not found, skipping")
+
             new_latest_ts = ts
-            # Also write to inbox so director knows
             entry = f"""
 ## [{dt}] Slack: Producer — 承認回答
 > {text}
 
-**承認ID**: {ap_id if match else "?"}
-**結果**: {ap_status if match else "?"}
+**承認ID**: {ap_id or "?"}
+**結果**: {ap_status or "?"}
 ステータス: UNREAD
 
 """
@@ -609,22 +631,7 @@ def check_slack(state: dict) -> str:
             new_latest_ts = ts
             continue
 
-        # Auto-approval detection: clear gate immediately (zero-token)
-        text_lower_check = text.lower().strip()
-        if any(p in text_lower_check for p in APPROVAL_PHRASES) or text_lower_check in ("ok", "okay", "良い"):
-            status_path = _cfg["project_root"] / "team/director/status.md"
-            if status_path.exists():
-                st_content = status_path.read_text()
-                if "承認待ち" in st_content or "approval pending" in st_content.lower():
-                    new_st = st_content.replace("承認待ち", "承認済み")
-                    new_st = re.sub(r'(?i)approval pending', 'approved', new_st)
-                    status_path.write_text(new_st)
-                    log("  → AUTO-APPROVAL: cleared gate in status.md")
-                    jlog("info", "auto_approval_cleared")
-                    try:
-                        slack_post("[by Bot] 承認確認。ゲート解除しました。作業を再開します。")
-                    except Exception:
-                        pass
+        # (Auto-approval now handled in INTENT_APPROVAL above via approvals.md)
 
         # TASK → classify → inbox → director-responder handles
         classification = ollama_classify(text)

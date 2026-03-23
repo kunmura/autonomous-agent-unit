@@ -312,9 +312,20 @@ fi
 
 # ─── APPROVAL_REMINDER → notify only, no Claude (zero-token) ───────────
 if [[ "$ACTION" == "APPROVAL_REMINDER" ]]; then
-    # Include pending AP-IDs in reminder
-    _PENDING_APS=$(grep -B1 '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null | grep '^## AP-' | sed 's/^## //' || true)
-    aau_notify_flush "承認待ちのため保留中です。以下の承認をお待ちしています:\n${_PENDING_APS}\n\n「AP-XXX 承認」または「AP-XXX 却下」でSlackからご回答ください。"
+    # Include pending approval summaries (human-readable, no AP-ID required)
+    _PENDING_SUMMARIES=$(python3 -c "
+import re
+with open('$TEAM_DIR/director/approvals.md') as f:
+    content = f.read()
+lines = content.split('\n')
+for i, line in enumerate(lines):
+    if line.startswith('## AP-'):
+        if i+1 < len(lines) and 'PENDING' in lines[i+1]:
+            # Extract summary after AP-XXX
+            summary = re.sub(r'^## AP-\d+\s*', '', line).strip()
+            print(f'・{summary}')
+" 2>/dev/null)
+    aau_notify_flush "プロデューサーの承認をお待ちしています。\n${_PENDING_SUMMARIES}\n\n承認する場合は「承認」「進めて」「OK」のいずれかをご返信ください。却下する場合は「却下」と理由をお伝えください。"
     touch "$APPROVAL_REMINDER_MARKER"
     aau_log "=== approval reminder sent, exit ==="
     aau_jlog "info" "approval_reminder_sent"

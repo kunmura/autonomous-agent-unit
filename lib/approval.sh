@@ -116,12 +116,10 @@ try:
     body.text = f"""以下をSlackでご回答ください：
 
 承認する場合:
-  {ap_id} 承認
+  「承認」「進めて」「OK」のいずれか
 
 却下する場合:
-  {ap_id} 却下 理由: (理由をお書きください)
-
-※ {ap_id} を必ず含めてください"""
+  「却下」と理由をお書きください"""
 
     prs.save(ppt_path)
     print("OK")
@@ -135,11 +133,10 @@ PYEOF
 
         # Upload PPT to Slack
         if [[ -n "$SLACK_TOKEN" && -n "$SLACK_CHANNEL" ]]; then
-            local upload_msg="${ap_id}: ${summary}
+            local upload_msg="【承認依頼】${summary}
 
-承認する場合 → 「${ap_id} 承認」
-却下する場合 → 「${ap_id} 却下 理由: ...」
-とSlackに投稿してください。"
+承認する場合 → 「承認」「進めて」「OK」のいずれかをご返信ください
+却下する場合 → 「却下」と理由をお伝えください"
 
             local file_size
             file_size=$(stat -f%z "$ppt_path" 2>/dev/null || stat -c%s "$ppt_path" 2>/dev/null)
