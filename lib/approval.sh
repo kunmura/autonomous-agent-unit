@@ -57,10 +57,10 @@ EOF
     aau_log "approval created: ${ap_id} — ${summary}"
     aau_jlog "info" "approval_created" "\"id\":\"$ap_id\",\"summary\":\"${summary:0:60}\""
 
-    # Generate PPT (zero-token)
+    # Generate PPT (zero-token) — self-contained document with embedded images & reports
     mkdir -p "$(dirname "$ppt_path")"
     python3 - "$ap_id" "$summary" "$context" "$ppt_path" "$AAU_PROJECT_ROOT" << 'PYEOF'
-import sys
+import sys, os, re
 from pathlib import Path
 
 ap_id = sys.argv[1]
@@ -71,95 +71,187 @@ project_root = Path(sys.argv[5])
 
 try:
     from pptx import Presentation
-    from pptx.util import Inches, Pt
+    from pptx.util import Inches, Pt, Emu
     from pptx.enum.text import PP_ALIGN
     from datetime import datetime
 
     prs = Presentation()
     prs.slide_width = Inches(13.33)
     prs.slide_height = Inches(7.5)
-
-    # Slide 1: Title
-    slide = prs.slides.add_slide(prs.slide_layouts[0])
-    slide.shapes.title.text = f"{ap_id}: 承認依頼"
-    slide.placeholders[1].text = f"{summary}\n\n{datetime.now().strftime('%Y-%m-%d')}"
-
-    # Slide 2: Summary
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "概要"
-    body = slide.placeholders[1]
-    body.text = summary
-    if context:
-        body.text += f"\n\n{context[:500]}"
-
-    # Slide 3: Deliverables (with content summaries, not just filenames)
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "成果物"
-    body = slide.placeholders[1]
-    outputs = []
     team_dir = project_root / "team"
+
+    def add_text_slide(title, body_text):
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = title
+        tf = slide.placeholders[1].text_frame
+        tf.clear()
+        for i, line in enumerate(body_text.split('\n')[:30]):
+            if i == 0:
+                tf.paragraphs[0].text = line
+                tf.paragraphs[0].font.size = Pt(14)
+            else:
+                p = tf.add_paragraph()
+                p.text = line
+                p.font.size = Pt(14)
+        return slide
+
+    def add_image_slide(title, image_path, caption=""):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+        # Title
+        from pptx.util import Inches, Pt
+        txBox = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), Inches(12), Inches(0.6))
+        tf = txBox.text_frame
+        tf.text = title
+        tf.paragraphs[0].font.size = Pt(24)
+        tf.paragraphs[0].font.bold = True
+        # Image — fit within slide
+        try:
+            from PIL import Image
+            with Image.open(str(image_path)) as img:
+                w, h = img.size
+            max_w, max_h = 11.5, 5.5
+            scale = min(max_w / (w / 96), max_h / (h / 96))
+            disp_w = min(w / 96 * scale, max_w)
+            disp_h = min(h / 96 * scale, max_h)
+        except Exception:
+            disp_w, disp_h = 10, 5.5
+        left = Inches((13.33 - disp_w) / 2)
+        top = Inches(1.0)
+        slide.shapes.add_picture(str(image_path), left, top,
+                                 Inches(disp_w), Inches(disp_h))
+        # Caption
+        if caption:
+            txBox2 = slide.shapes.add_textbox(Inches(0.5), Inches(6.8), Inches(12), Inches(0.5))
+            tf2 = txBox2.text_frame
+            tf2.text = caption
+            tf2.paragraphs[0].font.size = Pt(12)
+        return slide
+
+    # === Slide 1: Title ===
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    slide.shapes.title.text = f"承認依頼: {summary}"
+    slide.placeholders[1].text = f"{datetime.now().strftime('%Y-%m-%d')}\n{ap_id}"
+
+    # === Slide 2: Project Status ===
+    status_file = team_dir / "director" / "status.md"
+    if status_file.exists():
+        status_text = status_file.read_text(errors='ignore')[:1500]
+        add_text_slide("プロジェクト状況", status_text)
+
+    # === Slide 3: Summary + Context ===
+    summary_body = summary
+    if context:
+        summary_body += f"\n\n{context[:800]}"
+    # Add dashboard info if available
+    dashboard_file = team_dir / "dashboard.md"
+    if dashboard_file.exists():
+        try:
+            dash = dashboard_file.read_text(errors='ignore')
+            # Strip markdown formatting for PPT
+            dash_clean = re.sub(r'^[>#\-\s]*$', '', dash, flags=re.MULTILINE)
+            dash_clean = re.sub(r'\n{3,}', '\n\n', dash_clean).strip()
+            summary_body += f"\n\n--- ダッシュボード ---\n{dash_clean[:600]}"
+        except Exception:
+            pass
+    add_text_slide("概要", summary_body)
+
+    # === Slides 4+: Deliverables linked to recent DONE tasks ===
+    # Find DONE task IDs from each member's tasks.md, then include matching outputs
     for member_dir in sorted(team_dir.iterdir()):
         if not member_dir.is_dir() or member_dir.name == "director":
             continue
         out_dir = member_dir / "output"
-        if not out_dir.exists():
+        tasks_file = member_dir / "tasks.md"
+        if not out_dir.exists() or not tasks_file.exists():
             continue
-        for f in sorted(out_dir.iterdir()):
+
+        member_name = member_dir.name.capitalize()
+
+        # Get recent DONE task IDs (last 5)
+        done_ids = []
+        try:
+            for line in tasks_file.read_text(errors='ignore').split('\n'):
+                m = re.match(r'^###\s+(TASK-\S+).*\[DONE\]', line)
+                if m:
+                    done_ids.append(m.group(1))
+        except Exception:
+            continue
+        # Include all DONE tasks — completeness over brevity
+        if not done_ids:
+            continue
+
+        md_contents = []
+        images = []
+        other_files = []
+
+        for f in sorted(out_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
             if not f.is_file() or f.name.startswith('.'):
+                continue
+            # Only include files matching a DONE task ID
+            if not any(tid in f.name for tid in done_ids):
+                continue
+            # Skip evidence validation files
+            if f.name.endswith('_evidence.md'):
                 continue
             ext = f.suffix.lower()
             size_kb = f.stat().st_size / 1024
+
             if ext in ('.md', '.txt'):
-                # Include first few meaningful lines of text files
                 try:
-                    lines = f.read_text(errors='ignore').split('\n')
-                    # Skip headers and blank lines, get first 3 content lines
-                    content_lines = [l.strip() for l in lines if l.strip() and not l.startswith('#')][:3]
-                    desc = ' / '.join(content_lines)[:120]
-                    outputs.append(f"[{member_dir.name}] {f.name}\n  → {desc}")
+                    text = f.read_text(errors='ignore')
+                    md_contents.append((f.name, text))
                 except Exception:
-                    outputs.append(f"[{member_dir.name}] {f.name} ({size_kb:.0f}KB)")
-            elif ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
-                outputs.append(f"[{member_dir.name}] {f.name} (画像 {size_kb:.0f}KB)")
+                    pass
+            elif ext in ('.png', '.jpg', '.jpeg', '.webp'):
+                if size_kb < 10240:
+                    images.append(f)
             elif ext in ('.glb', '.gltf', '.obj', '.fbx'):
-                outputs.append(f"[{member_dir.name}] {f.name} (3Dモデル {size_kb/1024:.1f}MB)")
-            elif ext in ('.mp4', '.webm', '.gif'):
-                outputs.append(f"[{member_dir.name}] {f.name} (動画 {size_kb/1024:.1f}MB)")
-            elif ext in ('.pptx', '.xlsx', '.pdf'):
-                outputs.append(f"[{member_dir.name}] {f.name} (資料 {size_kb:.0f}KB)")
-            else:
-                outputs.append(f"[{member_dir.name}] {f.name} ({size_kb:.0f}KB)")
-    body.text = "\n".join(outputs[-20:]) if outputs else "(成果物なし)"
+                other_files.append(f"🎮 {f.name} ({size_kb/1024:.1f}MB 3Dモデル)")
+            elif ext in ('.mp4', '.webm'):
+                other_files.append(f"🎬 {f.name} ({size_kb/1024:.1f}MB 動画)")
+            elif ext not in ('.pptx',):
+                other_files.append(f"📎 {f.name} ({size_kb:.0f}KB)")
 
-    # Slide 3b: Status summary (from status.md and roadmap.md)
-    status_text = ""
-    status_file = team_dir / "director" / "status.md"
-    if status_file.exists():
-        try:
-            status_text = status_file.read_text()[:800]
-        except Exception:
-            pass
-    if status_text:
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = "プロジェクト状況"
-        body = slide.placeholders[1]
-        body.text = status_text
+        if not md_contents and not images and not other_files:
+            continue
 
-    # Slide 4: Approval request
-    slide = prs.slides.add_slide(prs.slide_layouts[1])
-    slide.shapes.title.text = "承認事項"
-    body = slide.placeholders[1]
-    body.text = f"""以下をSlackでご回答ください：
+        # Text reports — 1 report per slide, max 2 slides per report
+        for fname, text in md_contents[:3]:
+            lines = text.split('\n')
+            chunk_size = 25
+            for chunk_idx in range(0, min(len(lines), chunk_size * 2), chunk_size):
+                chunk = '\n'.join(lines[chunk_idx:chunk_idx + chunk_size])
+                if not chunk.strip():
+                    continue
+                page_label = f" ({chunk_idx // chunk_size + 1})" if len(lines) > chunk_size else ""
+                add_text_slide(f"[{member_name}] {fname}{page_label}", chunk)
+
+        # Images — embedded (max 3 per member)
+        for img in images[:3]:
+            add_image_slide(
+                f"[{member_name}] {img.name}",
+                img,
+                f"{img.stat().st_size / 1024:.0f}KB"
+            )
+
+        # Other files
+        if other_files:
+            add_text_slide(f"[{member_name}] その他の成果物", '\n'.join(other_files))
+
+    # === Final Slide: Approval Request ===
+    add_text_slide("承認事項", """以下をSlackでご回答ください：
 
 承認する場合:
   「承認」「進めて」「OK」のいずれか
 
 却下する場合:
-  「却下」と理由をお書きください"""
+  「却下」と理由をお書きください""")
 
     prs.save(ppt_path)
     print("OK")
 except Exception as e:
+    import traceback
+    traceback.print_exc()
     print(f"ERROR:{e}")
 PYEOF
 
