@@ -772,7 +772,7 @@ def flush_slack_queue():
         return
 
     posted_hashes_path = Path(f"/tmp/{prefix}_slack_posted_hashes")
-    min_interval = 600  # 10 minutes between similar messages
+    min_interval = 3600  # 1 hour between similar messages (prevents idle spam)
 
     # Read and clear queue atomically
     try:

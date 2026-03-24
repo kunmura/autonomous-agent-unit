@@ -114,6 +114,18 @@ MAX_TURNS="${MAX_TURNS:-30}"
 TOOLS=$(aau_member_attr "$MEMBER" "tools")
 TOOLS="${TOOLS:-Read,Write,Edit,Bash}"
 
+# Continuation boost: increase max_turns for continuation sessions
+# so the agent has enough budget to finish instead of looping
+MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
+_PREV_MT_COUNT=0
+[[ -f "$MT_FILE" ]] && _PREV_MT_COUNT=$(cat "$MT_FILE" 2>/dev/null || echo 0)
+if [[ "$_PREV_MT_COUNT" -gt 0 ]]; then
+    BOOST_FACTOR="${AAU_AGENT_CONTINUATION_BOOST:-15}"
+    MAX_TURNS=$(( MAX_TURNS + BOOST_FACTOR ))
+    TIMEOUT=$(( TIMEOUT + 300 ))
+    aau_log "continuation boost: max_turns=$MAX_TURNS, timeout=${TIMEOUT}s (prev failures: $_PREV_MT_COUNT)"
+fi
+
 # Check for draft.md (local LLM pre-draft)
 DRAFT_FILE="$AAU_PROJECT_ROOT/team/${MEMBER}/draft.md"
 DRAFT_HINT=""
@@ -139,13 +151,43 @@ NOTE: ${BLOCKED_COUNT} task(s) are [BLOCKED]. Check prerequisites before working
     fi
 fi
 
+# Check for continuation (previous session hit max turns or timed out)
+CONTINUATION_HINT=""
+MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
+MT_COUNT=0
+[[ -f "$MT_FILE" ]] && MT_COUNT=$(cat "$MT_FILE" 2>/dev/null || echo 0)
+if [[ "$MT_COUNT" -gt 0 ]]; then
+    # Extract current IN_PROGRESS task info and recent progress
+    _IP_TASK=$(grep -E '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null | head -1)
+    _RECENT_PROGRESS=""
+    PROGRESS_FILE="$AAU_PROJECT_ROOT/team/${MEMBER}/progress.md"
+    if [[ -f "$PROGRESS_FILE" ]]; then
+        _RECENT_PROGRESS=$(tail -20 "$PROGRESS_FILE" 2>/dev/null)
+    fi
+    CONTINUATION_HINT="
+
+## 継続セッション（重要）
+前回のセッションがmax turnsで中断しました（${MT_COUNT}回連続）。
+IN_PROGRESSタスク: ${_IP_TASK}
+
+前回の途中経過（progress.md末尾）:
+${_RECENT_PROGRESS}
+
+**指示**:
+- progress.md の途中経過を必ず確認し、**既に完了した作業を繰り返さないこと**
+- 残作業のみに集中する
+- ターン数を節約し、完了できなければ途中経過をprogress.mdに記録して正常終了する
+- ${MT_COUNT}回連続中断 — あと$((MT_THRESHOLD - MT_COUNT))回でタスクが自動BLOCKEDになる"
+    aau_log "continuation session: $MT_COUNT consecutive max turns"
+fi
+
 # Render prompt
 PROMPT=$(aau_render_prompt "agent_poll_tasks.txt" "member=$MEMBER")
 if [[ -z "$PROMPT" ]]; then
     # Fallback prompt if template not found
     PROMPT="team/${MEMBER}/tasks.md を読み、PENDINGタスクを処理せよ。完了したらステータスをDONEに更新し、progress.mdに結果を記録せよ。"
 fi
-PROMPT="${PROMPT}${DRAFT_HINT}${BLOCKED_HINT}"
+PROMPT="${PROMPT}${DRAFT_HINT}${BLOCKED_HINT}${CONTINUATION_HINT}"
 
 aau_log "launching Claude (timeout=${TIMEOUT}s, max_turns=$MAX_TURNS)"
 aau_jlog "info" "claude_launch" "\"member\":\"$MEMBER\",\"timeout\":$TIMEOUT,\"max_turns\":$MAX_TURNS"
@@ -198,14 +240,26 @@ elif [[ -f "$_AAU_LOG_FILE" ]] && tail -50 "$_AAU_LOG_FILE" 2>/dev/null | grep -
     _MAX_TURNS_HIT=true
 fi
 
-if [[ "$_MAX_TURNS_HIT" == "true" ]]; then
+# Check if a task actually completed during this session (DONE transition)
+# If so, max turns was productive — don't penalize
+_TASK_COMPLETED=false
+if [[ "$_MAX_TURNS_HIT" == "true" && -f "$TASKS_FILE" ]]; then
+    # Check if there are NO active tasks left (all completed)
+    _ACTIVE=$(grep -cE '^### TASK-.*\[(IN_PROGRESS|PENDING|NEEDS_EVIDENCE)\]' "$TASKS_FILE" 2>/dev/null || true)
+    if [[ "${_ACTIVE:-0}" -eq 0 ]]; then
+        _TASK_COMPLETED=true
+        aau_log "max turns hit but task completed — not penalizing"
+    fi
+fi
+
+if [[ "$_MAX_TURNS_HIT" == "true" && "$_TASK_COMPLETED" != "true" ]]; then
     MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
     MT_COUNT=0
     [[ -f "$MT_FILE" ]] && MT_COUNT=$(cat "$MT_FILE" 2>/dev/null || echo 0)
     MT_COUNT=$(( MT_COUNT + 1 ))
     echo "$MT_COUNT" > "$MT_FILE"
 
-    MT_THRESHOLD="${AAU_AGENT_MAX_TURNS_BLOCK_THRESHOLD:-2}"
+    MT_THRESHOLD="${AAU_AGENT_MAX_TURNS_BLOCK_THRESHOLD:-3}"
     if [[ "$MT_COUNT" -ge "$MT_THRESHOLD" ]]; then
         # Auto-BLOCKED: mark first active task as BLOCKED
         python3 - "$TASKS_FILE" << 'PYEOF'
@@ -231,6 +285,10 @@ PYEOF
         aau_notify "[Auto-BLOCKED] ${MEMBER}: ${MT_COUNT}回連続max turns到達。タスクをBLOCKEDに変更しました。"
         echo 0 > "$MT_FILE"
     fi
+elif [[ "$_TASK_COMPLETED" == "true" ]]; then
+    # Task completed — reset counter
+    MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
+    echo 0 > "$MT_FILE" 2>/dev/null
 fi
 
 if [[ "$EXIT_CODE" -eq 124 ]]; then
@@ -243,12 +301,17 @@ else
     aau_log "session succeeded"
     aau_jlog "info" "session_succeeded" "\"member\":\"$MEMBER\""
 
-    # Reset max-turns counter on success
-    MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
-    echo 0 > "$MT_FILE" 2>/dev/null
+    # Reset max-turns counter ONLY if max turns was NOT hit
+    # (Claude CLI exits 0 even on max turns, so check _MAX_TURNS_HIT)
+    if [[ "$_MAX_TURNS_HIT" != "true" ]]; then
+        MT_FILE="${AAU_TMP}/${AAU_PREFIX}_max_turns_${MEMBER}"
+        echo 0 > "$MT_FILE" 2>/dev/null
+    fi
 
     # Reset rapid launch counter on success (not a loop)
-    > "$COOLDOWN_LAUNCHES" 2>/dev/null
+    if [[ "$_MAX_TURNS_HIT" != "true" ]]; then
+        > "$COOLDOWN_LAUNCHES" 2>/dev/null
+    fi
 
     # Increment daily counter
     echo $(( DAILY_COUNT + 1 )) > "$DAILY_FILE"

@@ -223,30 +223,27 @@ fi
 
 # --- 5. IDLE_ALL (blocked by approval gate) ---
 if [[ "$ACTION" == "NO_ACTION" ]]; then
-    # Approval gate: if status.md has approval pending, do not enter IDLE_ALL
-    if [[ -f "$STATUS_FILE" ]] && grep -q '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null; then
-        aau_log "approval pending in status.md, blocking IDLE_ALL"
+    # Approval gate: if approvals.md has PENDING entry, do not enter IDLE_ALL
+    if grep -q '^status: PENDING' "$TEAM_DIR/director/approvals.md" 2>/dev/null; then
+        aau_log "approval pending, blocking IDLE_ALL"
         aau_jlog "info" "approval_gate_block"
-        ACTION="NO_ACTION"
-        ACTION_DETAIL="approval_gate_blocked"
-    fi
-fi
-
-if [[ "$ACTION" == "NO_ACTION" ]]; then
-    TOTAL_PENDING=0
-    TOTAL_INPROG=0
-    for MEMBER in $(aau_team_members); do
-        TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
-        if [[ -f "$TASKS_FILE" ]]; then
-            P=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
-            I=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
-            TOTAL_PENDING=$((TOTAL_PENDING + P))
-            TOTAL_INPROG=$((TOTAL_INPROG + I))
+        # Skip IDLE_ALL entirely — APPROVAL_REMINDER handles notifications
+    else
+        TOTAL_PENDING=0
+        TOTAL_INPROG=0
+        for MEMBER in $(aau_team_members); do
+            TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
+            if [[ -f "$TASKS_FILE" ]]; then
+                P=$(grep -cE '^### TASK-.*\[PENDING\]' "$TASKS_FILE" 2>/dev/null || true)
+                I=$(grep -cE '^### TASK-.*\[IN_PROGRESS\]' "$TASKS_FILE" 2>/dev/null || true)
+                TOTAL_PENDING=$((TOTAL_PENDING + P))
+                TOTAL_INPROG=$((TOTAL_INPROG + I))
+            fi
+        done
+        if [[ "$TOTAL_PENDING" -eq 0 && "$TOTAL_INPROG" -eq 0 ]]; then
+            ACTION="IDLE_ALL"
+            ACTION_DETAIL="pending=0,inprogress=0"
         fi
-    done
-    if [[ "$TOTAL_PENDING" -eq 0 && "$TOTAL_INPROG" -eq 0 ]]; then
-        ACTION="IDLE_ALL"
-        ACTION_DETAIL="pending=0,inprogress=0"
     fi
 fi
 
@@ -408,6 +405,9 @@ if [[ "$ACTION" == "IDLE_ALL" ]]; then
     cd "$AAU_PROJECT_ROOT"
     source "$SCRIPT_DIR/task_lifecycle.sh"
     aau_idle_all
+    # Touch heartbeat marker so the next NO_ACTION cycle doesn't immediately
+    # send a heartbeat right after an idle check (avoids double notification)
+    touch "${AAU_TMP}/${AAU_PREFIX}_heartbeat" 2>/dev/null
     aau_log "=== done (idle_all_zero_token) ==="
     aau_jlog "info" "done" "\"action\":\"IDLE_ALL\",\"method\":\"zero_token\""
     exit 0

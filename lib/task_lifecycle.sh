@@ -13,32 +13,108 @@ _aau_approval_pending() {
 
 # ─── DONE_FOLLOWUP (zero-token) ─────────────────────────────────────
 # Detect completed tasks, update roadmap, create next tasks from roadmap
+# Enhanced: reports deliverables (output files, screenshots) to Slack
 aau_followup_done() {
     local team_dir="$AAU_PROJECT_ROOT/team"
     local roadmap="$team_dir/director/roadmap.md"
     local status_file="$team_dir/director/status.md"
+    local reported_file="${AAU_TMP}/${AAU_PREFIX}_reported_done_tasks"
 
-    # Collect completed task info
-    local done_summary=""
-    local done_count=0
-    for _member in $(aau_team_members); do
-        local tf="$team_dir/$_member/tasks.md"
-        [[ -f "$tf" ]] || continue
-        local member_done
-        member_done=$(grep -cE '^### TASK-.*\[DONE\]' "$tf" 2>/dev/null || true)
-        if [[ "${member_done:-0}" -gt 0 ]]; then
-            done_count=$(( done_count + member_done ))
-            # Get latest done task titles for notification
-            local latest
-            latest=$(grep -E '^### TASK-.*\[DONE\]' "$tf" | tail -1 | sed -E 's/^### TASK-[0-9]+ //' | sed 's/ \[DONE\].*//')
-            done_summary="${done_summary}${_member}: ${latest}\n"
-        fi
-    done
+    # Identify NEWLY completed tasks (not previously reported)
+    local new_done_json
+    new_done_json=$(python3 - "$AAU_PROJECT_ROOT" "$reported_file" << 'PYDETECT'
+import re, sys, json
+from pathlib import Path
 
-    if [[ "$done_count" -eq 0 ]]; then
+root = Path(sys.argv[1])
+reported_path = Path(sys.argv[2])
+team_dir = root / "team"
+
+# Load already-reported task IDs
+reported = set()
+if reported_path.exists():
+    reported = set(reported_path.read_text().strip().splitlines())
+
+# Scan for DONE tasks and find new ones
+new_tasks = []
+all_done_ids = []
+for member_dir in sorted(team_dir.iterdir()):
+    if not member_dir.is_dir() or member_dir.name == "director":
+        continue
+    tf = member_dir / "tasks.md"
+    if not tf.exists():
+        continue
+    member = member_dir.name
+    for line in tf.read_text(errors="ignore").splitlines():
+        m = re.match(r'^### (TASK-\d+)\s+(.+?)\s*\[DONE\]', line)
+        if not m:
+            continue
+        task_id = m.group(1)
+        title = m.group(2).strip()
+        key = f"{member}/{task_id}"
+        all_done_ids.append(key)
+        if key in reported:
+            continue
+        # Find output files
+        out_dir = member_dir / "output"
+        images = []
+        texts = []
+        other = []
+        md_summary = ""
+        if out_dir.is_dir():
+            for f in sorted(out_dir.iterdir()):
+                if not f.name.startswith(task_id):
+                    continue
+                ext = f.suffix.lower()
+                if ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
+                    images.append(str(f))
+                elif ext == '.md':
+                    texts.append(str(f))
+                    # Extract summary (first 5 content lines)
+                    try:
+                        lines = [l.strip() for l in f.read_text(errors="ignore").splitlines()
+                                 if l.strip() and not l.strip().startswith('#') and not l.strip().startswith('---')]
+                        md_summary = " ".join(lines[:3])[:200]
+                    except:
+                        pass
+                elif ext in ('.pptx', '.pdf', '.xlsx'):
+                    other.append(str(f))
+            # Also check for screenshot subdirectories
+            ss_dir = out_dir / f"{task_id}_screenshots"
+            if ss_dir.is_dir():
+                for f in sorted(ss_dir.iterdir()):
+                    if f.suffix.lower() in ('.png', '.jpg', '.jpeg'):
+                        images.append(str(f))
+        new_tasks.append({
+            "member": member,
+            "task_id": task_id,
+            "title": title,
+            "key": key,
+            "images": images[:5],
+            "texts": texts,
+            "other": other,
+            "md_summary": md_summary,
+        })
+
+print(json.dumps({"new": new_tasks, "total_done": len(all_done_ids)}))
+PYDETECT
+    )
+
+    local total_done new_count
+    total_done=$(echo "$new_done_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['total_done'])" 2>/dev/null || echo 0)
+    new_count=$(echo "$new_done_json" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['new']))" 2>/dev/null || echo 0)
+
+    if [[ "$total_done" -eq 0 ]]; then
         aau_log "followup_done: no DONE tasks found"
         return 0
     fi
+
+    if [[ "$new_count" -eq 0 ]]; then
+        aau_log "followup_done: $total_done DONE tasks, all already reported"
+        return 0
+    fi
+
+    local done_count="$new_count"
 
     # Update roadmap checkboxes (if roadmap exists)
     local new_tasks_created=0
@@ -139,16 +215,94 @@ PYEOF
         aau_log "followup_done: roadmap updated, $new_tasks_created new tasks created"
     fi
 
-    # Notify
-    local msg="[完了報告] ${done_count}件完了"
-    if [[ -n "$done_summary" ]]; then
-        msg="${msg}\n$(echo -e "$done_summary" | head -5)"
-    fi
+    # Build detailed notification with deliverables
+    local msg="[完了報告] ${new_count}件完了"
+    local all_images=""
+    local reported_keys=""
+
+    # Parse each new task and build message
+    while IFS= read -r task_json; do
+        [[ -z "$task_json" ]] && continue
+        local t_member t_id t_title t_summary t_images t_texts t_other
+        t_member=$(echo "$task_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['member'])" 2>/dev/null)
+        t_id=$(echo "$task_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['task_id'])" 2>/dev/null)
+        t_title=$(echo "$task_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])" 2>/dev/null)
+        t_summary=$(echo "$task_json" | python3 -c "import sys,json; print(json.load(sys.stdin)['md_summary'])" 2>/dev/null)
+        t_images=$(echo "$task_json" | python3 -c "import sys,json; print('\n'.join(json.load(sys.stdin)['images']))" 2>/dev/null)
+        t_texts=$(echo "$task_json" | python3 -c "import sys,json; print('\n'.join(json.load(sys.stdin)['texts']))" 2>/dev/null)
+        t_other=$(echo "$task_json" | python3 -c "import sys,json; print('\n'.join(json.load(sys.stdin)['other']))" 2>/dev/null)
+        local t_key="${t_member}/${t_id}"
+
+        msg="${msg}\n\n*${t_member}*: ${t_id} ${t_title}"
+
+        # Add summary from .md files
+        if [[ -n "$t_summary" ]]; then
+            msg="${msg}\n　${t_summary:0:200}"
+        fi
+
+        # List text deliverables
+        if [[ -n "$t_texts" ]]; then
+            while IFS= read -r tf; do
+                [[ -n "$tf" ]] && msg="${msg}\n　:page_facing_up: $(basename "$tf")"
+            done <<< "$t_texts"
+        fi
+
+        # List image deliverables
+        local img_count=0
+        if [[ -n "$t_images" ]]; then
+            local img_names=""
+            while IFS= read -r img; do
+                [[ -n "$img" ]] || continue
+                img_names="${img_names} $(basename "$img")"
+                all_images="${all_images}${img}|${t_id} $(basename "$img")\n"
+                img_count=$((img_count + 1))
+            done <<< "$t_images"
+            if [[ "$img_count" -gt 0 ]]; then
+                msg="${msg}\n　:frame_with_picture: ${img_count}枚 —${img_names}"
+            fi
+        fi
+
+        # List other deliverables
+        if [[ -n "$t_other" ]]; then
+            while IFS= read -r of; do
+                [[ -n "$of" ]] && msg="${msg}\n　:file_folder: $(basename "$of")"
+            done <<< "$t_other"
+        fi
+
+        reported_keys="${reported_keys}${t_key}\n"
+    done < <(echo "$new_done_json" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for t in data['new']:
+    print(json.dumps(t))
+" 2>/dev/null)
+
     if [[ "${new_tasks_created:-0}" -gt 0 ]]; then
-        msg="${msg}\n次タスク${new_tasks_created}件をロードマップから自動配分しました"
+        msg="${msg}\n\n次タスク${new_tasks_created}件をロードマップから自動配分しました"
     fi
+
+    # Post text notification
     aau_notify "$msg"
-    aau_jlog "info" "followup_done_zero_token" "\"done\":$done_count,\"created\":${new_tasks_created:-0}"
+
+    # Upload images to Slack (max 10 total)
+    local upload_count=0
+    local upload_max=10
+    if [[ -n "$all_images" ]]; then
+        while IFS='|' read -r img_path img_title; do
+            [[ -z "$img_path" || "$upload_count" -ge "$upload_max" ]] && continue
+            if aau_upload_file "$img_path" "$img_title"; then
+                upload_count=$((upload_count + 1))
+                aau_log "followup_done: uploaded $img_title"
+            fi
+        done < <(echo -e "$all_images")
+    fi
+
+    # Mark tasks as reported
+    if [[ -n "$reported_keys" ]]; then
+        echo -e "$reported_keys" | grep -v '^$' >> "$reported_file"
+    fi
+
+    aau_jlog "info" "followup_done_zero_token" "\"new_done\":$new_count,\"total_done\":$total_done,\"created\":${new_tasks_created:-0},\"uploaded\":$upload_count"
 }
 
 # ─── IDLE_ALL (zero-token) ───────────────────────────────────────────
@@ -166,7 +320,6 @@ aau_idle_all() {
 
     # No roadmap → wait for producer instructions
     if [[ ! -f "$roadmap" ]]; then
-        aau_notify "待機中。プロデューサーの指示をお待ちしています。"
         aau_log "idle_all: no roadmap, waiting"
         aau_jlog "info" "idle_all_no_roadmap"
         return 0
@@ -198,6 +351,11 @@ for line in roadmap.splitlines():
         unchecked.append(line.strip()[5:].strip())
     elif re.match(r'^###\s', line) and in_schedule and not line.strip().startswith('- '):
         in_schedule = False
+
+if not active_sprint:
+    # No ### SPRINT: formatted sprint found — roadmap uses a different format
+    print("NO_SPRINT_FORMAT")
+    sys.exit(0)
 
 if not unchecked:
     print("SPRINT_COMPLETE")
@@ -233,9 +391,34 @@ print(f"CREATED:{created}")
 PYEOF
     )
 
+    if [[ "$result" == "NO_SPRINT_FORMAT" ]]; then
+        # Roadmap exists but doesn't use ### SPRINT: format — wait for director/producer
+        aau_log "idle_all: roadmap has no SPRINT-format sections, waiting for instructions"
+        aau_jlog "info" "idle_all_no_sprint_format"
+        # No notification — heartbeat covers "system alive" status.
+        # Sending "waiting" messages repeatedly annoys the producer.
+        return 0
+    fi
+
     if [[ "$result" == "SPRINT_COMPLETE" ]]; then
-        # Register approval (PENDING in approvals.md)
         source "$SCRIPT_DIR/approval.sh"
+        # Dedup: skip if the last approval was created within cooldown (default 1h)
+        local _approval_cooldown="${AAU_APPROVAL_DEDUP_COOLDOWN:-3600}"
+        local _last_created
+        _last_created=$(grep -E '^created:' "$_AAU_APPROVALS_FILE" 2>/dev/null | tail -1 | sed 's/created: //')
+        if [[ -n "$_last_created" ]]; then
+            local _last_ts
+            _last_ts=$(date -j -f "%Y-%m-%d %H:%M" "$_last_created" +%s 2>/dev/null || date -d "$_last_created" +%s 2>/dev/null || echo 0)
+            local _now_ts
+            _now_ts=$(date +%s)
+            local _age=$(( _now_ts - _last_ts ))
+            if [[ "$_age" -lt "$_approval_cooldown" ]]; then
+                aau_log "idle_all: sprint complete but last approval was ${_age}s ago (cooldown=${_approval_cooldown}s), skipping"
+                aau_jlog "info" "idle_all_approval_dedup" "\"age\":$_age,\"cooldown\":$_approval_cooldown"
+                return 0
+            fi
+        fi
+        # Register approval (PENDING in approvals.md)
         source "$SCRIPT_DIR/task_summarizer.sh"
         local _roadmap_info
         _roadmap_info=$(aau_roadmap_summary 2>/dev/null)
@@ -257,7 +440,6 @@ PYEOF
         aau_log "idle_all: created $created_count tasks from roadmap"
         aau_jlog "info" "idle_all_tasks_created" "\"created\":$created_count"
     else
-        aau_notify "待機中。ロードマップの全アイテムは配分済みです。"
         aau_log "idle_all: all roadmap items already assigned"
     fi
 }
