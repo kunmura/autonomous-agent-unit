@@ -147,8 +147,8 @@ PROMISE_PHRASES = [
 ]
 
 PROMISE_EXCLUDE = [
-    "ディレクターが後ほど対応します",
-    "確認します。ディレクターが",
+    "受信しました",
+    "[by Bot]",
 ]
 
 # Record trigger keyword (set in aau.yaml via slack.record_keyword, default: "録画")
@@ -266,7 +266,7 @@ def ollama_classify(text: str) -> dict:
         return {
             "importance": "medium",
             "summary": text[:50],
-            "auto_reply": "確認します。ディレクターが後ほど対応します。",
+            "auto_reply": "受信しました。",
         }
 
     prompt = f"""You are a simple Slack notification bot.
@@ -278,14 +278,14 @@ Respond with JSON only:
 {{
   "importance": "high",
   "summary": "日本語で1文の要約（50字以内）",
-  "auto_reply": "確認します。ディレクターが後ほど対応します。"
+  "auto_reply": "受信しました。"
 }}
 
 Rules:
 - "high": questions, requests, instructions
 - "medium": general chat
 - "low": simple reactions ("OK", "了解", emoji)
-- auto_reply for high/medium: EXACTLY "確認します。ディレクターが後ほど対応します。"
+- auto_reply for high/medium: EXACTLY "受信しました。"
 - auto_reply for low: EXACTLY "👍"
 """
     body = json.dumps({
@@ -307,7 +307,7 @@ Rules:
     return {
         "importance": "medium",
         "summary": text[:50],
-        "auto_reply": "確認します。ディレクターが後ほど対応します。",
+        "auto_reply": "受信しました。",
     }
 
 
@@ -646,7 +646,7 @@ def check_slack(state: dict) -> str:
         # TASK → classify → inbox → director-responder handles
         classification = ollama_classify(text)
         summary = classification.get("summary", text[:50])
-        auto_reply = classification.get("auto_reply", "確認します。ディレクターが後ほど対応します。")
+        auto_reply = classification.get("auto_reply", "受信しました。")
 
         # Auto-reply with agent name tag
         try:

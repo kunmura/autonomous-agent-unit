@@ -178,7 +178,7 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
                 if [[ "$PROG_AGE" -gt "$STALE_THRESHOLD" ]]; then
                     # Skip if we already failed STALE_PROGRESS for this member recently
                     STALE_FAIL_MARKER="${AAU_TMP}/${AAU_PREFIX}_stale_fail_${MEMBER}"
-                    STALE_COOLDOWN="${AAU_STALE_FAIL_COOLDOWN:-7200}"
+                    STALE_COOLDOWN="${AAU_STALE_FAIL_COOLDOWN:-1800}"
                     if [[ -f "$STALE_FAIL_MARKER" ]]; then
                         STALE_FAIL_AGE=$(( NOW - $(aau_file_mtime "$STALE_FAIL_MARKER") ))
                         if [[ "$STALE_FAIL_AGE" -lt "$STALE_COOLDOWN" ]]; then
@@ -424,14 +424,20 @@ if [[ "$ACTION" == "STALE_PROGRESS" ]]; then
         aau_notify "[Auto-Split] ${STALE_MEMBER}の停滞タスクを分割しました。サブタスクを順次処理します。"
         aau_jlog "info" "stale_auto_decomposed" "\"member\":\"$STALE_MEMBER\""
     else
-        # Ollama failed — fall back to Claude with limited template
-        aau_log "auto-decompose failed, falling back to Claude"
+        # Ollama failed — notify producer directly (don't silently swallow)
+        aau_log "auto-decompose failed, notifying producer"
         touch "${AAU_TMP}/${AAU_PREFIX}_stale_fail_${STALE_MEMBER}"
-        # Notify producer only once (fallback dedup handles this)
-        if _should_post_fallback 2>/dev/null; then
-            aau_notify "[Stale] ${STALE_MEMBER}のタスク自動分割に失敗。プロデューサー確認をお願いします。"
-            touch "${AAU_TMP}/${AAU_PREFIX}_fallback_STALE_PROGRESS"
+        # Get task name for context
+        _STALE_TASK=$(grep -E '^### TASK-.*\[IN_PROGRESS\]' "$TEAM_DIR/$STALE_MEMBER/tasks.md" 2>/dev/null | head -1 | sed 's/^### //' | sed 's/ \[IN_PROGRESS\].*//')
+        # Check agent failure count
+        _FAIL_FILE="${AAU_TMP}/${AAU_PREFIX}_fail_count_${STALE_MEMBER}"
+        _FAIL_COUNT=0
+        [[ -f "$_FAIL_FILE" ]] && _FAIL_COUNT=$(cat "$_FAIL_FILE" 2>/dev/null || echo 0)
+        _STALE_MSG="[停滞] ${STALE_MEMBER}: ${_STALE_TASK:-タスク不明}"
+        if [[ "${_FAIL_COUNT:-0}" -gt 0 ]]; then
+            _STALE_MSG="${_STALE_MSG}（${_FAIL_COUNT}回連続セッション失敗中）"
         fi
+        aau_notify "$_STALE_MSG"
     fi
     aau_log "=== done (stale_auto_decompose) ==="
     aau_jlog "info" "done" "\"action\":\"STALE_PROGRESS\",\"method\":\"auto_decompose\""
