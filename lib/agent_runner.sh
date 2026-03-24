@@ -107,6 +107,8 @@ if ! aau_acquire_lock "$LOCK_NAME"; then
 fi
 
 # Get member-specific config
+RUNTIME=$(aau_member_attr "$MEMBER" "runtime")
+RUNTIME="${RUNTIME:-claude}"  # "claude" (default) or "aider"
 TIMEOUT=$(aau_member_attr "$MEMBER" "timeout")
 TIMEOUT="${TIMEOUT:-600}"
 MAX_TURNS=$(aau_member_attr "$MEMBER" "max_turns")
@@ -181,51 +183,69 @@ ${_RECENT_PROGRESS}
     aau_log "continuation session: $MT_COUNT consecutive max turns"
 fi
 
-# Render prompt
-PROMPT=$(aau_render_prompt "agent_poll_tasks.txt" "member=$MEMBER")
+# Render prompt (use aider-specific template if runtime=aider)
+if [[ "$RUNTIME" == "aider" ]]; then
+    PROMPT=$(aau_render_prompt "agent_poll_tasks_aider.txt" "member=$MEMBER")
+else
+    PROMPT=$(aau_render_prompt "agent_poll_tasks.txt" "member=$MEMBER")
+fi
 if [[ -z "$PROMPT" ]]; then
-    # Fallback prompt if template not found
     PROMPT="team/${MEMBER}/tasks.md を読み、PENDINGタスクを処理せよ。完了したらステータスをDONEに更新し、progress.mdに結果を記録せよ。"
 fi
 PROMPT="${PROMPT}${DRAFT_HINT}${BLOCKED_HINT}${CONTINUATION_HINT}"
 
-aau_log "launching Claude (timeout=${TIMEOUT}s, max_turns=$MAX_TURNS)"
-aau_jlog "info" "claude_launch" "\"member\":\"$MEMBER\",\"timeout\":$TIMEOUT,\"max_turns\":$MAX_TURNS"
-
 OUTFILE="${AAU_TMP}/${AAU_PREFIX}_agent_${MEMBER}_$$.out"
-
 cd "$AAU_PROJECT_ROOT"
 
-# Check for agent definition file
-AGENT_FLAG=""
-AGENT_FILE="$AAU_PROJECT_ROOT/.claude/agents/${MEMBER}.md"
-if [[ -f "$AGENT_FILE" ]]; then
-    AGENT_FLAG="--agent $MEMBER"
-fi
+if [[ "$RUNTIME" == "aider" ]]; then
+    # ── aider + Ollama execution path ─────────────────────────────────
+    AIDER_MODEL=$(aau_member_attr "$MEMBER" "aider_model")
+    AIDER_MODEL="${AIDER_MODEL:-ollama_chat/qwen2.5-coder:32b}"
+    AIDER_FILES=$(aau_member_attr "$MEMBER" "aider_files")
+    AIDER_MAX_ROUNDS="${MAX_TURNS}"  # max_turns = max aider rounds for this runtime
 
-# Build tool flags
-TOOL_FLAGS=""
-if [[ -n "$TOOLS" ]]; then
-    TOOL_FLAGS="--tools $TOOLS --allowedTools $TOOLS"
-fi
+    aau_log "launching aider (model=$AIDER_MODEL, timeout=${TIMEOUT}s, max_rounds=$AIDER_MAX_ROUNDS)"
+    aau_jlog "info" "aider_launch" "\"member\":\"$MEMBER\",\"model\":\"$AIDER_MODEL\",\"timeout\":$TIMEOUT,\"max_rounds\":$AIDER_MAX_ROUNDS"
 
-aau_log "tools: $TOOLS"
-
-if [[ -n "$AGENT_FLAG" ]]; then
-    aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
-        $AGENT_FLAG \
-        --model "$AAU_MODEL" \
-        --print \
-        --permission-mode "$AAU_PERM" \
-        --max-turns "$MAX_TURNS" \
-        $TOOL_FLAGS
+    source "$SCRIPT_DIR/aider_runner.sh"
+    aau_run_aider "$MEMBER" "$PROMPT" "$TIMEOUT" "$AIDER_MAX_ROUNDS" \
+        "$AIDER_MODEL" "$AIDER_FILES" "$OUTFILE"
 else
-    aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
-        --model "$AAU_MODEL" \
-        --print \
-        --permission-mode "$AAU_PERM" \
-        --max-turns "$MAX_TURNS" \
-        $TOOL_FLAGS
+    # ── Claude CLI execution path (default) ───────────────────────────
+    aau_log "launching Claude (timeout=${TIMEOUT}s, max_turns=$MAX_TURNS)"
+    aau_jlog "info" "claude_launch" "\"member\":\"$MEMBER\",\"timeout\":$TIMEOUT,\"max_turns\":$MAX_TURNS"
+
+    # Check for agent definition file
+    AGENT_FLAG=""
+    AGENT_FILE="$AAU_PROJECT_ROOT/.claude/agents/${MEMBER}.md"
+    if [[ -f "$AGENT_FILE" ]]; then
+        AGENT_FLAG="--agent $MEMBER"
+    fi
+
+    # Build tool flags
+    TOOL_FLAGS=""
+    if [[ -n "$TOOLS" ]]; then
+        TOOL_FLAGS="--tools $TOOLS --allowedTools $TOOLS"
+    fi
+
+    aau_log "tools: $TOOLS"
+
+    if [[ -n "$AGENT_FLAG" ]]; then
+        aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
+            $AGENT_FLAG \
+            --model "$AAU_MODEL" \
+            --print \
+            --permission-mode "$AAU_PERM" \
+            --max-turns "$MAX_TURNS" \
+            $TOOL_FLAGS
+    else
+        aau_run_with_timeout "$TIMEOUT" "$OUTFILE" "$PROMPT" "$AAU_CLAUDE" \
+            --model "$AAU_MODEL" \
+            --print \
+            --permission-mode "$AAU_PERM" \
+            --max-turns "$MAX_TURNS" \
+            $TOOL_FLAGS
+    fi
 fi
 
 EXIT_CODE=$?
