@@ -10,7 +10,7 @@ _OLLAMA_LOCK="${AAU_TMP}/${AAU_PREFIX}_ollama.lock"
 
 # ── Ollama exclusive lock (one agent at a time to prevent OOM) ────────────
 _aider_acquire_ollama_lock() {
-    local max_wait="${1:-180}"
+    local max_wait="${1:-600}"
     local waited=0
     while [[ -f "$_OLLAMA_LOCK" ]]; do
         local lock_pid

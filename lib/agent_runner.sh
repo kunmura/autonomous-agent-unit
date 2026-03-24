@@ -36,14 +36,17 @@ if [[ "$DAILY_COUNT" -ge "$DAILY_MAX" ]]; then
     exit 0
 fi
 
-# ─── Rapid relaunch cooldown ─────────────────────────────────────────
-# If this agent launched N+ times in the last 30min with no task completion, cooldown
+# ─── Early runtime detection (needed for cooldown decisions) ──────────
+_EARLY_RUNTIME=$(aau_member_attr "$MEMBER" "runtime" 2>/dev/null)
+_EARLY_RUNTIME="${_EARLY_RUNTIME:-claude}"
+
+# ─── Rapid relaunch cooldown (Claude API only — local LLM has no cost/rate limits) ───
 COOLDOWN_FILE="${AAU_TMP}/${AAU_PREFIX}_agent_${MEMBER}_cooldown"
 COOLDOWN_LAUNCHES="${AAU_TMP}/${AAU_PREFIX}_agent_${MEMBER}_launches"
 MAX_RAPID_LAUNCHES="${AAU_AGENT_MAX_RAPID_LAUNCHES:-4}"
 NOW=$(date +%s)
 
-if [[ -f "$COOLDOWN_FILE" ]]; then
+if [[ "$_EARLY_RUNTIME" == "claude" && -f "$COOLDOWN_FILE" ]]; then
     COOLDOWN_UNTIL=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo 0)
     if [[ "$NOW" -lt "$COOLDOWN_UNTIL" ]]; then
         REMAINING=$(( COOLDOWN_UNTIL - NOW ))
@@ -53,6 +56,9 @@ if [[ -f "$COOLDOWN_FILE" ]]; then
     else
         rm -f "$COOLDOWN_FILE"
     fi
+elif [[ "$_EARLY_RUNTIME" != "claude" && -f "$COOLDOWN_FILE" ]]; then
+    # Local LLM: clear any leftover cooldown
+    rm -f "$COOLDOWN_FILE"
 fi
 
 # No trigger → zero-token exit
@@ -81,23 +87,24 @@ if [[ -f "$TASKS_FILE" ]]; then
     fi
 fi
 
-# Track launch count for cooldown detection
-echo "$NOW" >> "$COOLDOWN_LAUNCHES"
-# Keep only entries from last 30 minutes
-if [[ -f "$COOLDOWN_LAUNCHES" ]]; then
-    CUTOFF=$(( NOW - 1800 ))
-    RECENT_LAUNCHES=0
-    while IFS= read -r ts; do
-        if [[ "$ts" -ge "$CUTOFF" ]]; then
-            RECENT_LAUNCHES=$(( RECENT_LAUNCHES + 1 ))
+# Track launch count for cooldown detection (Claude API only)
+if [[ "$_EARLY_RUNTIME" == "claude" ]]; then
+    echo "$NOW" >> "$COOLDOWN_LAUNCHES"
+    if [[ -f "$COOLDOWN_LAUNCHES" ]]; then
+        CUTOFF=$(( NOW - 1800 ))
+        RECENT_LAUNCHES=0
+        while IFS= read -r ts; do
+            if [[ "$ts" -ge "$CUTOFF" ]]; then
+                RECENT_LAUNCHES=$(( RECENT_LAUNCHES + 1 ))
+            fi
+        done < "$COOLDOWN_LAUNCHES"
+        if [[ "$RECENT_LAUNCHES" -ge "$MAX_RAPID_LAUNCHES" ]]; then
+            aau_log "rapid relaunch detected ($RECENT_LAUNCHES in 30min), entering 30min cooldown"
+            aau_jlog "warn" "cooldown_activated" "\"launches\":$RECENT_LAUNCHES"
+            echo $(( NOW + 1800 )) > "$COOLDOWN_FILE"
+            > "$COOLDOWN_LAUNCHES"
+            exit 0
         fi
-    done < "$COOLDOWN_LAUNCHES"
-    if [[ "$RECENT_LAUNCHES" -ge "$MAX_RAPID_LAUNCHES" ]]; then
-        aau_log "rapid relaunch detected ($RECENT_LAUNCHES in 30min), entering 30min cooldown"
-        aau_jlog "warn" "cooldown_activated" "\"launches\":$RECENT_LAUNCHES"
-        echo $(( NOW + 1800 )) > "$COOLDOWN_FILE"
-        > "$COOLDOWN_LAUNCHES"
-        exit 0
     fi
 fi
 
@@ -334,24 +341,30 @@ elif [[ "$EXIT_CODE" -ne 0 ]]; then
         _FAIL_HINT=$(tail -10 "$_AAU_LOG_FILE" 2>/dev/null | grep -iE 'timed out|error|refused|rate limit|overloaded|503|529' | tail -1)
     fi
 
-    # Exponential backoff: 1→60s, 2→120s, 3→300s+notify, 4→600s, 5+→1800s+notify
-    if [[ "$FAIL_COUNT" -ge "$FAIL_BACKOFF_THRESHOLD" ]]; then
-        FAIL_COOLDOWN="${AAU_AGENT_FAIL_COOLDOWN:-1800}"
-        echo $(( $(date +%s) + FAIL_COOLDOWN )) > "$COOLDOWN_FILE"
-        aau_log "fail backoff: $FAIL_COUNT consecutive failures, entering ${FAIL_COOLDOWN}s cooldown"
-        aau_jlog "warn" "fail_backoff" "\"member\":\"$MEMBER\",\"failures\":$FAIL_COUNT,\"cooldown\":$FAIL_COOLDOWN"
-        aau_notify "[Fail-Backoff] ${MEMBER}: ${FAIL_COUNT}回連続失敗。${FAIL_COOLDOWN}秒クールダウンに入ります。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
-    elif [[ "$FAIL_COUNT" -eq "$FAIL_NOTIFY_THRESHOLD" ]]; then
-        # First notification + moderate cooldown
-        local _MODERATE_COOLDOWN=$(( 60 * FAIL_COUNT ))  # 3→180s, 4→240s
-        echo $(( $(date +%s) + _MODERATE_COOLDOWN )) > "$COOLDOWN_FILE"
-        aau_log "fail escalation: $FAIL_COUNT failures, cooldown ${_MODERATE_COOLDOWN}s"
-        aau_notify "[Warning] ${MEMBER}: ${FAIL_COUNT}回連続セッション失敗中。${_MODERATE_COOLDOWN}秒後にリトライ。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
-    elif [[ "$FAIL_COUNT" -ge 2 ]]; then
-        # Progressive cooldown: 2→120s, 3→180s, 4→240s (before threshold)
-        local _PROG_COOLDOWN=$(( 60 * FAIL_COUNT ))
-        echo $(( $(date +%s) + _PROG_COOLDOWN )) > "$COOLDOWN_FILE"
-        aau_log "progressive backoff: $FAIL_COUNT failures, cooldown ${_PROG_COOLDOWN}s"
+    # Backoff and escalation (Claude API: exponential backoff, local LLM: notify only)
+    if [[ "$RUNTIME" == "aider" ]]; then
+        # Local LLM: no cooldown, just notify at threshold
+        if [[ "$FAIL_COUNT" -eq "$FAIL_NOTIFY_THRESHOLD" ]]; then
+            aau_notify "[Warning] ${MEMBER}: ${FAIL_COUNT}回連続失敗中（ローカルLLM）。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+        fi
+    else
+        # Claude API: exponential backoff to save cost
+        if [[ "$FAIL_COUNT" -ge "$FAIL_BACKOFF_THRESHOLD" ]]; then
+            FAIL_COOLDOWN="${AAU_AGENT_FAIL_COOLDOWN:-1800}"
+            echo $(( $(date +%s) + FAIL_COOLDOWN )) > "$COOLDOWN_FILE"
+            aau_log "fail backoff: $FAIL_COUNT consecutive failures, entering ${FAIL_COOLDOWN}s cooldown"
+            aau_jlog "warn" "fail_backoff" "\"member\":\"$MEMBER\",\"failures\":$FAIL_COUNT,\"cooldown\":$FAIL_COOLDOWN"
+            aau_notify "[Fail-Backoff] ${MEMBER}: ${FAIL_COUNT}回連続失敗。${FAIL_COOLDOWN}秒クールダウンに入ります。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+        elif [[ "$FAIL_COUNT" -eq "$FAIL_NOTIFY_THRESHOLD" ]]; then
+            _MODERATE_COOLDOWN=$(( 60 * FAIL_COUNT ))
+            echo $(( $(date +%s) + _MODERATE_COOLDOWN )) > "$COOLDOWN_FILE"
+            aau_log "fail escalation: $FAIL_COUNT failures, cooldown ${_MODERATE_COOLDOWN}s"
+            aau_notify "[Warning] ${MEMBER}: ${FAIL_COUNT}回連続セッション失敗中。${_MODERATE_COOLDOWN}秒後にリトライ。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+        elif [[ "$FAIL_COUNT" -ge 2 ]]; then
+            _PROG_COOLDOWN=$(( 60 * FAIL_COUNT ))
+            echo $(( $(date +%s) + _PROG_COOLDOWN )) > "$COOLDOWN_FILE"
+            aau_log "progressive backoff: $FAIL_COUNT failures, cooldown ${_PROG_COOLDOWN}s"
+        fi
     fi
 else
     aau_log "session succeeded"
