@@ -154,55 +154,80 @@ aau_notify_flush() {
     esac
 }
 
-# Upload a file to Slack (reuses approval.sh upload pattern)
+# Upload a file to Slack with retry and response verification
 # Args: $1=file_path $2=title(optional) $3=initial_comment(optional)
+# Returns: 0 on verified success, 1 on failure
 aau_upload_file() {
     local file_path="$1"
     local title="${2:-$(basename "$file_path")}"
     local comment="${3:-}"
+    local max_retries="${AAU_UPLOAD_MAX_RETRIES:-2}"
 
-    [[ -f "$file_path" ]] || return 1
-    [[ -z "$SLACK_TOKEN" || -z "$SLACK_CHANNEL" ]] && return 1
+    [[ -f "$file_path" ]] || { aau_log "upload: file not found: $file_path"; return 1; }
+    [[ -z "$SLACK_TOKEN" || -z "$SLACK_CHANNEL" ]] && { aau_log "upload: SLACK_TOKEN or SLACK_CHANNEL not set"; return 1; }
 
     local file_size
     file_size=$(stat -f%z "$file_path" 2>/dev/null || stat -c%s "$file_path" 2>/dev/null)
-    # Skip files >10MB
-    [[ "$file_size" -gt 10485760 ]] && return 1
+    [[ "$file_size" -gt 10485760 ]] && { aau_log "upload: file too large (${file_size} bytes): $file_path"; return 1; }
 
     local file_name
     file_name=$(basename "$file_path")
 
-    # Step 1: Get upload URL
-    local resp
-    resp=$(curl -s -X POST 'https://slack.com/api/files.getUploadURLExternal' \
-        -H "Authorization: Bearer ${SLACK_TOKEN}" \
-        -H 'Content-Type: application/x-www-form-urlencoded' \
-        -d "filename=${file_name}&length=${file_size}")
-    local upload_url file_id
-    upload_url=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null)
-    file_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_id',''))" 2>/dev/null)
-    [[ -z "$upload_url" || -z "$file_id" ]] && return 1
+    local attempt
+    for (( attempt=1; attempt<=max_retries; attempt++ )); do
+        # Step 1: Get upload URL
+        local resp
+        resp=$(curl -s --max-time 30 -X POST 'https://slack.com/api/files.getUploadURLExternal' \
+            -H "Authorization: Bearer ${SLACK_TOKEN}" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            -d "filename=${file_name}&length=${file_size}")
+        local ok upload_url file_id
+        ok=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null)
+        if [[ "$ok" != "True" ]]; then
+            aau_log "upload: step1 failed (attempt $attempt/$max_retries): $(echo "$resp" | head -c 200)"
+            [[ "$attempt" -lt "$max_retries" ]] && sleep 3
+            continue
+        fi
+        upload_url=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null)
+        file_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('file_id',''))" 2>/dev/null)
+        [[ -z "$upload_url" || -z "$file_id" ]] && { aau_log "upload: empty url/id"; continue; }
 
-    # Step 2: Upload file content
-    curl -s -X POST "$upload_url" -F "file=@${file_path}" > /dev/null 2>&1
+        # Step 2: Upload file content (verify HTTP status)
+        local http_code
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 60 -X POST "$upload_url" -F "file=@${file_path}")
+        if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
+            aau_log "upload: step2 failed (HTTP $http_code, attempt $attempt/$max_retries)"
+            [[ "$attempt" -lt "$max_retries" ]] && sleep 3
+            continue
+        fi
 
-    # Step 3: Complete upload
-    local complete_body="{\"files\":[{\"id\":\"${file_id}\",\"title\":\"${title}\"}],\"channel_id\":\"${SLACK_CHANNEL}\""
-    if [[ -n "$comment" ]]; then
-        # Escape JSON special chars in comment
-        local escaped_comment
-        escaped_comment=$(echo "$comment" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))" 2>/dev/null | sed 's/^"//;s/"$//')
-        complete_body="${complete_body},\"initial_comment\":\"${escaped_comment}\""
-    fi
-    complete_body="${complete_body}}"
+        # Step 3: Complete upload (verify response)
+        local complete_body="{\"files\":[{\"id\":\"${file_id}\",\"title\":\"${title}\"}],\"channel_id\":\"${SLACK_CHANNEL}\""
+        if [[ -n "$comment" ]]; then
+            local escaped_comment
+            escaped_comment=$(echo "$comment" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))" 2>/dev/null | sed 's/^"//;s/"$//')
+            complete_body="${complete_body},\"initial_comment\":\"${escaped_comment}\""
+        fi
+        complete_body="${complete_body}}"
 
-    curl -s -X POST 'https://slack.com/api/files.completeUploadExternal' \
-        -H "Authorization: Bearer ${SLACK_TOKEN}" \
-        -H 'Content-Type: application/json' \
-        -d "$complete_body" > /dev/null 2>&1
+        local complete_resp
+        complete_resp=$(curl -s --max-time 30 -X POST 'https://slack.com/api/files.completeUploadExternal' \
+            -H "Authorization: Bearer ${SLACK_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d "$complete_body")
+        local complete_ok
+        complete_ok=$(echo "$complete_resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null)
+        if [[ "$complete_ok" == "True" ]]; then
+            aau_log "file uploaded: $file_name (${file_size} bytes)"
+            return 0
+        fi
 
-    aau_log "file uploaded: $file_name"
-    return 0
+        aau_log "upload: step3 failed (attempt $attempt/$max_retries): $(echo "$complete_resp" | head -c 200)"
+        [[ "$attempt" -lt "$max_retries" ]] && sleep 3
+    done
+
+    aau_log "upload: all $max_retries attempts failed for $file_name"
+    return 1
 }
 
 # ─── Prompt rendering ───────────────────────────────────────────────────

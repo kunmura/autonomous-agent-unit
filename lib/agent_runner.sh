@@ -314,15 +314,24 @@ elif [[ "$EXIT_CODE" -ne 0 ]]; then
         _FAIL_HINT=$(tail -10 "$_AAU_LOG_FILE" 2>/dev/null | grep -iE 'timed out|error|refused|rate limit|overloaded|503|529' | tail -1)
     fi
 
+    # Exponential backoff: 1→60s, 2→120s, 3→300s+notify, 4→600s, 5+→1800s+notify
     if [[ "$FAIL_COUNT" -ge "$FAIL_BACKOFF_THRESHOLD" ]]; then
-        # Enter cooldown to stop burning API calls
         FAIL_COOLDOWN="${AAU_AGENT_FAIL_COOLDOWN:-1800}"
         echo $(( $(date +%s) + FAIL_COOLDOWN )) > "$COOLDOWN_FILE"
         aau_log "fail backoff: $FAIL_COUNT consecutive failures, entering ${FAIL_COOLDOWN}s cooldown"
         aau_jlog "warn" "fail_backoff" "\"member\":\"$MEMBER\",\"failures\":$FAIL_COUNT,\"cooldown\":$FAIL_COOLDOWN"
         aau_notify "[Fail-Backoff] ${MEMBER}: ${FAIL_COUNT}回連続失敗。${FAIL_COOLDOWN}秒クールダウンに入ります。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
     elif [[ "$FAIL_COUNT" -eq "$FAIL_NOTIFY_THRESHOLD" ]]; then
-        aau_notify "[Warning] ${MEMBER}: ${FAIL_COUNT}回連続セッション失敗中。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+        # First notification + moderate cooldown
+        local _MODERATE_COOLDOWN=$(( 60 * FAIL_COUNT ))  # 3→180s, 4→240s
+        echo $(( $(date +%s) + _MODERATE_COOLDOWN )) > "$COOLDOWN_FILE"
+        aau_log "fail escalation: $FAIL_COUNT failures, cooldown ${_MODERATE_COOLDOWN}s"
+        aau_notify "[Warning] ${MEMBER}: ${FAIL_COUNT}回連続セッション失敗中。${_MODERATE_COOLDOWN}秒後にリトライ。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+    elif [[ "$FAIL_COUNT" -ge 2 ]]; then
+        # Progressive cooldown: 2→120s, 3→180s, 4→240s (before threshold)
+        local _PROG_COOLDOWN=$(( 60 * FAIL_COUNT ))
+        echo $(( $(date +%s) + _PROG_COOLDOWN )) > "$COOLDOWN_FILE"
+        aau_log "progressive backoff: $FAIL_COUNT failures, cooldown ${_PROG_COOLDOWN}s"
     fi
 else
     aau_log "session succeeded"

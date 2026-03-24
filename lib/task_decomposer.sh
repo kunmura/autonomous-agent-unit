@@ -8,6 +8,12 @@
 
 _DECOMPOSER_OLLAMA_URL="${AAU_LOCAL_LLM_URL:-http://localhost:11434/api/generate}"
 _DECOMPOSER_OLLAMA_MODEL="${AAU_LOCAL_LLM_MODEL:-gemma2:9b}"
+_DECOMPOSER_OLLAMA_BASE="${_DECOMPOSER_OLLAMA_URL%/api/generate}"
+
+# Quick Ollama health check (returns 0 if reachable, 1 if not)
+_ollama_is_alive() {
+    curl -s --max-time 5 "${_DECOMPOSER_OLLAMA_BASE}/api/tags" > /dev/null 2>&1
+}
 
 aau_decompose_stale_task() {
     local member="$1"
@@ -16,6 +22,13 @@ aau_decompose_stale_task() {
 
     if [[ ! -f "$tasks_file" ]]; then
         aau_log "decompose: tasks.md not found for $member"
+        return 1
+    fi
+
+    # Pre-check: is Ollama reachable?
+    if ! _ollama_is_alive; then
+        aau_log "decompose: Ollama unreachable (${_DECOMPOSER_OLLAMA_BASE}), skip"
+        aau_jlog "warn" "ollama_unreachable"
         return 1
     fi
 
