@@ -297,6 +297,33 @@ if [[ "$EXIT_CODE" -eq 124 ]]; then
 elif [[ "$EXIT_CODE" -ne 0 ]]; then
     aau_log "session failed (exit=$EXIT_CODE)"
     aau_jlog "warn" "session_failed" "\"member\":\"$MEMBER\",\"exit\":$EXIT_CODE"
+
+    # ── Consecutive failure tracking & escalation ─────────────────
+    FAIL_FILE="${AAU_TMP}/${AAU_PREFIX}_fail_count_${MEMBER}"
+    FAIL_COUNT=0
+    [[ -f "$FAIL_FILE" ]] && FAIL_COUNT=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
+    FAIL_COUNT=$(( FAIL_COUNT + 1 ))
+    echo "$FAIL_COUNT" > "$FAIL_FILE"
+
+    FAIL_NOTIFY_THRESHOLD="${AAU_AGENT_FAIL_NOTIFY_THRESHOLD:-3}"
+    FAIL_BACKOFF_THRESHOLD="${AAU_AGENT_FAIL_BACKOFF_THRESHOLD:-5}"
+
+    # Extract error hint from output
+    _FAIL_HINT=""
+    if [[ -f "$_AAU_LOG_FILE" ]]; then
+        _FAIL_HINT=$(tail -10 "$_AAU_LOG_FILE" 2>/dev/null | grep -iE 'timed out|error|refused|rate limit|overloaded|503|529' | tail -1)
+    fi
+
+    if [[ "$FAIL_COUNT" -ge "$FAIL_BACKOFF_THRESHOLD" ]]; then
+        # Enter cooldown to stop burning API calls
+        FAIL_COOLDOWN="${AAU_AGENT_FAIL_COOLDOWN:-1800}"
+        echo $(( $(date +%s) + FAIL_COOLDOWN )) > "$COOLDOWN_FILE"
+        aau_log "fail backoff: $FAIL_COUNT consecutive failures, entering ${FAIL_COOLDOWN}s cooldown"
+        aau_jlog "warn" "fail_backoff" "\"member\":\"$MEMBER\",\"failures\":$FAIL_COUNT,\"cooldown\":$FAIL_COOLDOWN"
+        aau_notify "[Fail-Backoff] ${MEMBER}: ${FAIL_COUNT}回連続失敗。${FAIL_COOLDOWN}秒クールダウンに入ります。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+    elif [[ "$FAIL_COUNT" -eq "$FAIL_NOTIFY_THRESHOLD" ]]; then
+        aau_notify "[Warning] ${MEMBER}: ${FAIL_COUNT}回連続セッション失敗中。${_FAIL_HINT:+原因: ${_FAIL_HINT}}"
+    fi
 else
     aau_log "session succeeded"
     aau_jlog "info" "session_succeeded" "\"member\":\"$MEMBER\""
@@ -311,6 +338,16 @@ else
     # Reset rapid launch counter on success (not a loop)
     if [[ "$_MAX_TURNS_HIT" != "true" ]]; then
         > "$COOLDOWN_LAUNCHES" 2>/dev/null
+    fi
+
+    # Reset consecutive failure counter on success
+    FAIL_FILE="${AAU_TMP}/${AAU_PREFIX}_fail_count_${MEMBER}"
+    if [[ -f "$FAIL_FILE" ]]; then
+        _PREV_FAILS=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
+        if [[ "${_PREV_FAILS:-0}" -gt 0 ]]; then
+            aau_log "session recovered after $_PREV_FAILS consecutive failures"
+        fi
+        echo 0 > "$FAIL_FILE"
     fi
 
     # Increment daily counter
