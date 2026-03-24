@@ -103,26 +103,34 @@ if [[ "$ACTION" == "NO_ACTION" ]]; then
 fi
 
 # --- 1. DONE_FOLLOWUP (highest priority after MILESTONE) ---
-# Check before REPORT_DUE so new completions trigger task creation immediately
+# Check if there are unreported DONE tasks by comparing against reported_done_tasks
 if [[ "$ACTION" == "NO_ACTION" ]]; then
-    DONE_TASKS=""
+    REPORTED_FILE="${AAU_TMP}/${AAU_PREFIX}_reported_done_tasks"
+    _HAS_UNREPORTED=false
     for MEMBER in $(aau_team_members); do
         TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
-        if [[ -f "$TASKS_FILE" ]]; then
-            M_DONE=$(grep -cE '^### TASK-.*\[DONE\]' "$TASKS_FILE" 2>/dev/null || true)
-            if [[ "$M_DONE" -gt 0 ]]; then
-                DONE_TASKS="${DONE_TASKS}${MEMBER}:${M_DONE} "
+        [[ -f "$TASKS_FILE" ]] || continue
+        while IFS= read -r line; do
+            TASK_ID=$(echo "$line" | grep -oE 'TASK-[0-9]+' | head -1)
+            [[ -z "$TASK_ID" ]] && continue
+            KEY="${MEMBER}/${TASK_ID}"
+            if ! grep -qF "$KEY" "$REPORTED_FILE" 2>/dev/null; then
+                _HAS_UNREPORTED=true
+                break
             fi
-        fi
+        done < <(grep -E '^### TASK-.*\[DONE\]' "$TASKS_FILE" 2>/dev/null)
+        [[ "$_HAS_UNREPORTED" == "true" ]] && break
     done
-    if [[ -n "$DONE_TASKS" ]]; then
-        CURRENT_HASH=$(echo "$DONE_TASKS" | aau_md5)
-        SEEDED_HASH=""
-        [[ -f "$DONE_SEED" ]] && SEEDED_HASH=$(cat "$DONE_SEED" 2>/dev/null)
-        if [[ "$CURRENT_HASH" != "$SEEDED_HASH" ]]; then
-            ACTION="DONE_FOLLOWUP"
-            ACTION_DETAIL="done_tasks=$DONE_TASKS"
-        fi
+    if [[ "$_HAS_UNREPORTED" == "true" ]]; then
+        DONE_TASKS=""
+        for MEMBER in $(aau_team_members); do
+            TASKS_FILE="$TEAM_DIR/$MEMBER/tasks.md"
+            [[ -f "$TASKS_FILE" ]] || continue
+            M_DONE=$(grep -cE '^### TASK-.*\[DONE\]' "$TASKS_FILE" 2>/dev/null || true)
+            [[ "$M_DONE" -gt 0 ]] && DONE_TASKS="${DONE_TASKS}${MEMBER}:${M_DONE} "
+        done
+        ACTION="DONE_FOLLOWUP"
+        ACTION_DETAIL="done_tasks=$DONE_TASKS"
     fi
 fi
 
@@ -367,15 +375,6 @@ if [[ "$ACTION" == "DONE_FOLLOWUP" ]]; then
     cd "$AAU_PROJECT_ROOT"
     source "$SCRIPT_DIR/task_lifecycle.sh"
     aau_followup_done
-    # Update DONE_SEED
-    DONE_NOW=""
-    for _M in $(aau_team_members); do
-        _TF="$TEAM_DIR/$_M/tasks.md"
-        [[ -f "$_TF" ]] || continue
-        _MD=$(grep -cE '^### TASK-.*\[DONE\]' "$_TF" 2>/dev/null || true)
-        [[ "$_MD" -gt 0 ]] && DONE_NOW="${DONE_NOW}${_M}:${_MD} "
-    done
-    echo "$DONE_NOW" | aau_md5 > "$DONE_SEED"
     aau_log "=== done (done_followup_zero_token) ==="
     aau_jlog "info" "done" "\"action\":\"DONE_FOLLOWUP\",\"method\":\"zero_token\""
     exit 0
@@ -616,14 +615,7 @@ else
             echo "$CURRENT_STATE_HASH" > "$REPORT_STATE_SEED"
             ;;
         DONE_FOLLOWUP)
-            DONE_NOW=""
-            for M in $(aau_team_members); do
-                TF="$TEAM_DIR/$M/tasks.md"
-                [[ -f "$TF" ]] || continue
-                MD=$(grep -cE '^### TASK-.*\[DONE\]' "$TF" 2>/dev/null || true)
-                [[ "$MD" -gt 0 ]] && DONE_NOW="${DONE_NOW}${M}:${MD} "
-            done
-            echo "$DONE_NOW" | aau_md5 > "$DONE_SEED"
+            # reported_done_tasks is updated by aau_followup_done itself
             ;;
     esac
 fi
